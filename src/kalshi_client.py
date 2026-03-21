@@ -336,9 +336,12 @@ class KalshiWSClient:
         while self._running:
             try:
                 headers = _auth_headers(self._private_key, "GET", "/trade-api/ws/v2")
+                # websockets <11 uses extra_headers, >=11 uses additional_headers
+                ws_version = int(websockets.__version__.split(".")[0])
+                hdr_kwarg = "additional_headers" if ws_version >= 11 else "extra_headers"
                 async with websockets.connect(
                     KALSHI_WS_URL,
-                    extra_headers=headers,
+                    **{hdr_kwarg: headers},
                     ping_interval=30,
                     ping_timeout=10,
                 ) as ws:
