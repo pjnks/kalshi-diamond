@@ -1,0 +1,33 @@
+# Environment & secrets
+.env
+*.pem
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+nohup.out
+
+# Claude
+.claude/
