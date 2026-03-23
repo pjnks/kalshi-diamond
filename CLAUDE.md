@@ -1,25 +1,32 @@
 # DIAMOND — Kalshi Unusual Volume Tracker
 
 ## Project Purpose
-Real-time anomaly detection on Kalshi prediction markets. Monitors trade sizes, volume spikes, order book imbalances, and cross-market correlations to identify potentially informed flow. **Now includes automated live trading** — places real orders on Kalshi when anomalies are detected.
+Real-time anomaly detection on Kalshi prediction markets with **10-feature detection engine**, event-aware conviction tracking, portfolio intelligence, and automated live trading. Places real orders on Kalshi when anomalies are detected with order-book-aware pricing.
 
-Part of the gemstone-named trading sub-project family (AGATE, BERYL, CITRINE, DIAMOND). **Standalone repo** — separate from HMM-Trader.
+Part of the gemstone-named trading sub-project family (AGATE, BERYL, CITRINE, DIAMOND). **Standalone repo** — separate from HMM-Trader. GitHub: `pjnks/kalshi-diamond` (private).
 
 ## Architecture
 ```
-Kalshi WebSocket ──► Stream Processor ──► Feature Engine ──► Alert Engine
-     (trade channel)    (asyncio)         (6 detectors)     (Pushover/macOS/SQLite)
-         │                                                        │
-         └──► REST Poller ──► Market Metadata Cache               ▼
-              (order book,     (refresh 5min)              Dashboard (:8080)
-               market info)                                       │
-                                                                  ▼
-                                                         Paper Trading Engine
-                                                         (auto-bet on ALERT+)
-                                                              │
-                                                              ▼
-                                                         Kalshi REST API
-                                                         (real orders via /portfolio/orders)
+Kalshi WebSocket ──► Stream Processor ──► 10-Feature Engine ──► Alert Engine
+     (trade channel)    (asyncio)         (10 detectors)       (Pushover/SQLite)
+         │                                     │                      │
+         └──► REST Poller ──► Market Cache      │               Dashboard (:8080)
+              (order book,     (5min)           ▼                      │
+               market info)              Conviction Tracker            ▼
+                                         (event grouping,       Paper Trading Engine
+                                          decayed sums,         (book-aware pricing,
+                                          BLOCK/FLIP)            adaptive execution)
+                                               │                      │
+                                               ▼                      ▼
+                                         Portfolio Intelligence  Kalshi REST API
+                                         (category limits,      (real orders via
+                                          event caps,            /portfolio/orders)
+                                          burst throttle)
+                                               │
+                                               ▼
+                                         Self-Learning Pipeline
+                                         (feature attribution,
+                                          adaptive weights)
 ```
 
 ### Market Discovery
@@ -36,32 +43,65 @@ The monitor has a **3-minute warmup** (`WARMUP_SEC = 180`) after startup. During
 
 ### Live Trading Engine (`src/diamond_paper.py`)
 Auto-places real Kalshi orders when anomalies reach ALERT level or above:
-- **Order type:** GTC (good-till-canceled) limit orders with price slippage adjustment
-- **Slippage:** Adjusts entry price by +8¢ above signal price to improve fill rate on thin books
-- **Kill switch:** Stops new trades when total daily P&L (realized + unrealized) drops below -$20
-- **Unrealized P&L:** Estimated using last trade price per ticker vs entry price
-- **Dedup:** One position per ticker (won't re-enter same market)
+- **Order-book-aware pricing:** Fetches fresh order book, prices at best ask + cross margin
+- **Adaptive execution tiers:** CRITICAL: ask+3¢, High ALERT: ask+2¢, Low ALERT: ask+1¢
+- **Dynamic max spread:** CRITICAL: 25¢, High ALERT: 20¢, Low ALERT: 15¢
+- **Min price filter:** Skips trades at or below `PAPER_MIN_PRICE_CENTS` (default 5¢)
+- **Kill switch:** Stops new trades when total daily P&L drops below -$20
+- **Dedup:** One position per ticker per 24 hours (was 30 min)
+- **Stale order cancel:** GTC orders auto-cancelled after 1 hour
 - **Settlement polling:** Checks order fills and market settlements every 2 minutes
-- **Notifications:** Pushover alerts for trade fills, settlements, and kill switch triggers
+- **Handles Kalshi `executed` status:** Orders on settled markets properly cleaned up
+- **Notifications:** Pushover alerts for fills, settlements, flips, kill switch, order failures
+- **Session recycling:** aiohttp session auto-recreates every 30 min; force-recycles on connection errors
+
+### Conviction System (`src/diamond_conviction.py`)
+Event-aware trade management preventing both-sides positions:
+- **Event grouping:** `ticker.rsplit("-", 1)[0]` identifies sibling markets
+- **Conviction formula:** `Σ (score_i × e^(-age_i / half_life))` — decayed sum per side
+- **Decisions:** ALLOW (no opposing signals), BLOCK (opposing side stronger), FLIP (new side exceeds old + threshold)
+- **Persistence:** Signals saved to SQLite `conviction_signals` table, restored on startup
+- **Config:** `CONVICTION_HALF_LIFE_SEC=420` (7 min), `CONVICTION_FLIP_THRESHOLD=0.4`
+
+### Portfolio Intelligence
+- **Category limits:** Max 15 open positions per market category
+- **Event caps:** Max 1 position per event (prevents both-sides trading)
+- **Burst throttle:** Max 8 trades per 5-minute window
+- **Config:** `PAPER_MAX_PER_CATEGORY`, `PAPER_MAX_PER_EVENT`, `PAPER_MAX_TRADES_PER_5MIN`
+
+### Self-Learning Pipeline (`src/diamond_analytics.py`)
+- **Feature attribution:** Per-feature win rate, avg P&L, primary driver analysis
+- **Co-occurrence patterns:** Which feature combinations predict outcomes
+- **Adaptive weights:** Blends current weights with settlement-derived optimal weights
+- **Activation:** Requires 50+ settled trades (run manually or via scheduled task)
+
+### REST Client Resilience (`src/kalshi_client.py`)
+- **Session recycling:** `SESSION_RECYCLE_SEC = 1800` — recreates aiohttp session every 30 minutes to prevent stale connections
+- **Force-recycle on errors:** Connection errors (`ClientConnectorError`, `ServerDisconnectedError`, `OSError`) trigger immediate session recreation before retry
+- **WebSocket version compat:** Auto-detects websockets version and uses `additional_headers` (v11+) or `extra_headers` (v10)
 
 ## Key Files
 | File | Purpose |
 |------|---------|
 | `diamond_config.py` | API keys, thresholds, feature weights, trading config |
-| `src/kalshi_client.py` | WebSocket + REST API client (incl. order placement) |
+| `src/kalshi_client.py` | WebSocket + REST API client (incl. order placement, session recycling) |
 | `src/diamond_store.py` | SQLite storage + rolling aggregates + paper trade tracking |
-| `src/diamond_features.py` | 6 detection features + composite score |
+| `src/diamond_features.py` | 10 detection features + composite score |
+| `src/diamond_conviction.py` | Event-aware conviction tracking (BLOCK/FLIP) |
+| `src/diamond_analytics.py` | Self-learning: feature attribution + adaptive weights |
 | `src/diamond_alerts.py` | Alert engine with cooldowns |
-| `src/diamond_paper.py` | **Live trading engine** — auto-bet on anomalies |
-| `diamond_monitor.py` | Main async loop (entry point) |
-| `diamond_dashboard.py` | Dash visualization at :8080 |
+| `src/diamond_paper.py` | **Live trading engine** — auto-bet on anomalies, min price filter |
+| `diamond_monitor.py` | Main async loop (entry point) — runs everything |
+| `diamond_dashboard.py` | Dash visualization at :8080 (futuristic terminal aesthetic) |
 | `diamond_dashboard_lite.py` | Lightweight fallback dashboard |
 | `diamond_backtest.py` | Historical replay + grid search |
+| `deploy.sh` | Deploy to OCI: `./deploy.sh` (sync) or `./deploy.sh --restart` |
 | `test_tuning.py` | Live 60s tuning harness |
 | `test_live.py` | Live integration test |
 
 ## Running
 ```bash
+# Local (Mac)
 PYTHONPATH=. python diamond_monitor.py                    # Monitor + live trading
 PYTHONPATH=. python diamond_monitor.py --category politics  # Filter by category
 PYTHONPATH=. python diamond_monitor.py --test              # Dry run (no alerts, no trades)
@@ -70,15 +110,31 @@ PYTHONPATH=. python test_tuning.py                         # 60s tuning session
 PYTHONPATH=. python diamond_backtest.py replay --tickers 10 # Historical replay
 PYTHONPATH=. python diamond_backtest.py gridsearch          # Grid search optimization
 PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluation
+
+# Deploy to OCI
+./deploy.sh              # Sync files only
+./deploy.sh --restart    # Sync + restart monitor & dashboard
 ```
 
+## Deployment — OCI Compute Instance
+- **Host:** `129.158.40.51` (Oracle Cloud Infrastructure)
+- **SSH:** `ssh -i ~/.ssh/hmm-trader.key ubuntu@129.158.40.51`
+- **Python:** `/home/ubuntu/miniconda3/bin/python` (Python 3.13)
+- **Code:** `/home/ubuntu/kalshi-diamond/`
+- **Deploy:** `./deploy.sh --restart` from local Mac (uses scp, not git)
+- **Processes:** Monitor + Dashboard run as nohup background processes
+- **Logs:** `diamond_monitor.log`, `diamond_dashboard.log` on OCI
+- **Note:** Git not yet set up on OCI. Using scp via `deploy.sh` instead.
+
 ## Tech Stack
-- Python 3.9 (system anaconda), asyncio
-- WebSocket: `websockets` (v10.3 — uses `extra_headers=` not `additional_headers=`)
-- HTTP: `aiohttp`
+- **Mac:** Python 3.9 (system anaconda), websockets v10.3 (`extra_headers=`)
+- **OCI:** Python 3.13 (miniconda), websockets v16 (`additional_headers=`)
+- **Version compat:** `kalshi_client.py` auto-detects websockets version for header kwarg
+- HTTP: `aiohttp` (with 30-min session recycling)
 - Storage: SQLite (`diamond_trades.db`)
-- Dashboard: Dash 4.0 + Plotly 6.6 + dash-bootstrap-components
+- Dashboard: Dash 4.0 + Plotly 6.6 + dash-bootstrap-components + Google Fonts (Inter, JetBrains Mono)
 - Notifications: Pushover + macOS native
+- Source control: GitHub (`pjnks/kalshi-diamond`, private), `gh` CLI
 
 ## Conventions
 - Config in `diamond_config.py` (not scattered imports)
@@ -86,18 +142,17 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - **CRITICAL:** RSA private key MUST be stored as separate `.pem` file — NEVER paste inline in `.env`. `python-dotenv` cannot parse multiline PEM and will silently corrupt the key path.
 - `.env` must contain `KALSHI_PRIVATE_KEY_PATH=kalshi_private_key.pem` (just the filename, NOT the key content)
 - Notification pattern reused from HMM-Trader's `src/notifier.py`
-- Dashboard dark terminal UI pattern from HMM-Trader's `citrine_dashboard.py`
 - Gemstone naming: prefix files with `diamond_` for project-specific modules
 
 ## Current Status
-**All 8 steps complete + live trading active. Portfolio generating returns.**
-- Steps 1-6: Scaffolding, API client, storage, features, alerts, main loop ✅
-- Step 7: Dashboard ✅ (live at :8080, dark terminal UI, 30s auto-refresh)
-- Step 8: Backtester ✅ (replay, grid search, precision evaluation)
-- Dashboard Polish ✅ (metric cards, charts, legend alignment, EST timezone)
-- Live Production Hardening ✅ (sensitivity tuning, market discovery fix, display names)
-- **Live Trading Engine ✅** (auto-bet on ALERT+, GTC orders, kill switch, settlement tracking)
-- **Portfolio: ~$108.90 from $100 deposit (as of March 19, 2026)** — early but positive
+**All 8 steps complete + live trading active on OCI.**
+- Steps 1-8: Core system ✅
+- Dashboard Redesign ✅ (futuristic terminal aesthetic, glassmorphism, Inter + JetBrains Mono)
+- Live Trading Engine ✅ (auto-bet on ALERT+, GTC orders, kill switch, settlement tracking)
+- OCI Deployment ✅ (monitor + dashboard running 24/7)
+- Session Resilience ✅ (30-min recycling, force-recycle on errors, Pushover on failures)
+- Min Price Filter ✅ (skip trades ≤ 5¢)
+- GitHub Repo ✅ (`pjnks/kalshi-diamond`, private)
 
 ## Trading Configuration (`.env`)
 ```
@@ -108,26 +163,29 @@ PAPER_MAX_POSITIONS=100            # Max simultaneous open positions
 PAPER_MAX_UNREALIZED_CENTS=2000    # $20 kill switch (realized + unrealized P&L)
 PAPER_POLL_INTERVAL_SEC=120        # Settlement check interval (2 min)
 PAPER_NOTIFY_TRADES=true           # Pushover notifications for trades
+PAPER_MIN_PRICE_CENTS=5            # Skip trades at or below this price (avoid longshots)
 ```
 
 ### Trading Rules
-- Every ALERT+ signal (score ≥ 0.65) places a real order — no price filtering
-- GTC limit orders with +8¢ slippage adjustment for fill improvement
+- Every ALERT+ signal (score ≥ 0.55) places a real order
+- Min price filter: skips contracts ≤ 5¢ to avoid longshot bleed
+- GTC limit orders with +3-8¢ slippage adjustment for fill improvement
 - One position per ticker (dedup)
 - Kill switch at -$20 total daily P&L (realized losses + unrealized losses on open positions)
 - All positions ride to settlement (no early exits)
 - Resets daily at midnight
+- Pushover notification on order placement failures (silent failures no longer possible)
 
 ## Tuning Summary
 **Alert distribution:** NONE ~86%, LOG ~11%, NOTABLE ~2%, ALERT ~1%.
-**Feature weights:** zscore=0.30, spike=0.20, imbalance=0.20, skew=0.15, impact=0.10, correlation=0.05.
+**Feature weights (v2, tuned March 22):** skew=0.20, sweep=0.15, zscore=0.12, velocity=0.12, imbalance=0.12, spike=0.10, book_delta=0.06, impact=0.05, concentration=0.05, correlation=0.03.
 **Composite scoring:** Capped weight redistribution (max 1.5×, 1.3× for <3 features).
 
 ### Current Alert Thresholds
 ```
 LOG      = 0.25   # SQLite only
 NOTABLE  = 0.45   # macOS notification
-ALERT    = 0.65   # Pushover push + triggers live trade
+ALERT    = 0.55   # Pushover push + triggers live trade (lowered from 0.65 on March 21)
 CRITICAL = 0.78   # Emergency Pushover (lowered from 0.85 to get 1-3/day)
 ```
 
@@ -140,23 +198,30 @@ CRITICAL = 0.78   # Emergency Pushover (lowered from 0.85 to get 1-3/day)
 CRITICAL=30s, ALERT=2.5min, NOTABLE=5min, with escalation bypass.
 
 ## Dashboard Features (`diamond_dashboard.py`)
-- **6 metric cards:** Trades, Markets, Anom Rate, Logged, Alert, Critical
-- **Volume + anomaly timeline:** 5-min buckets, last 6 hours, stacked by level
-- **Feature radar chart:** Breakdown of most recent high-severity anomaly
-- **Top markets bar chart:** 1h volume leaders (shows human-readable titles)
+**Futuristic terminal aesthetic** with glassmorphism, Inter + JetBrains Mono fonts.
+
+- **Animated gradient header border** (cyan↔violet shifting)
+- **Glassmorphism panels** with `backdrop-filter: blur(12px)`, subtle cyan border glow
+- **6 metric cards:** Trades, Markets, Anom Rate, Logged, Alert, Critical — with hover lift effect
+- **Volume + anomaly timeline:** 5-min buckets, last 6 hours, cyan→violet gradient bars
+- **Feature radar chart:** Cyan glowing stroke, translucent fill
+- **Top markets bar chart:** Gradient fill (cyan → violet)
 - **Feature weights & alert thresholds** reference panel
+- **Portfolio section:** Status, P&L, win rate, open positions, trade activity metrics
+- **Paper trades table:** With fill status, P&L, settlement results
 - **Live anomaly feed table:**
-  - Sortable, color-coded by level (ALERT/CRITICAL highlighted, NOTABLE dimmed)
-  - **Level filter buttons** (All, Critical, Alert+, Notable+, Log) with counts
+  - Sortable, color-coded: CRITICAL=red, ALERT=amber, NOTABLE=violet, LOG=gray
+  - **Level filter buttons** (All, Critical, Alert, Notable, Log) with counts + glassmorphism
   - Filter persists across 30s auto-refresh via `dcc.Store`
-  - **Tooltip on hover** for truncated market names (shows full name)
+  - **Tooltip on hover** for truncated market names
+  - **Time (ET)** column with timezone label
   - 200 row limit, 20 per page
-  - Shows human-readable market titles with ticker fallback
 - Auto-refreshes every 30 seconds
 
 ### Known Dashboard Issues
 - **Black screen after laptop sleep/wake:** Dashboard process stays alive but Dash stops rendering. Fix: restart with `pkill -f diamond_dashboard && PYTHONPATH=. nohup python diamond_dashboard.py &`
-- **Filter button reset:** Pattern-matching callbacks can reset on refresh when buttons are recreated. Guard added but may have edge cases. Consider moving filter bar outside `body-container` or using `dcc.RadioItems`.
+- **Filter button reset:** Pattern-matching callbacks can reset on refresh when buttons are recreated. Guard added but may have edge cases.
+- **NaN market titles:** Some markets have NULL/NaN titles in DB. Fixed with `str()` wrapping in `_build_market_volume_heatmap()`.
 
 ## Database Schema
 SQLite at `diamond_trades.db`. Key tables:
@@ -195,7 +260,8 @@ paper_trades (
 
 ## Gotchas
 - **CRITICAL `.env` gotcha:** NEVER paste the RSA private key inline in `.env`. ALWAYS store it as a separate `.pem` file and reference via `KALSHI_PRIVATE_KEY_PATH=kalshi_private_key.pem`. Pasting inline causes `python-dotenv` parse errors and `FileNotFoundError` pointing at `-----BEGIN RSA PRIVATE KEY-----` as a path. This has happened multiple times — always check `.env` first when debugging auth issues.
-- `websockets` v10.3: uses `extra_headers=` not `additional_headers=`
+- **websockets version:** Mac uses v10 (`extra_headers=`), OCI uses v16 (`additional_headers=`). Auto-detected in `kalshi_client.py`.
+- **Stale aiohttp sessions:** Long-running processes (2+ days) can have stale HTTP sessions that silently fail on order placement. Fixed with 30-min session recycling + force-recycle on connection errors.
 - Rate limit 429 common when paginating all markets — has retry + delay
 - `int("0.00")` crashes — use `float()` for Kalshi string numeric fields
 - Pushover emergency priority (2) notifications repeat every 60s until acknowledged in-app
@@ -204,19 +270,25 @@ paper_trades (
 - **Dashboard black screen:** After laptop sleep/wake, the Dash app's React frontend stops rendering while the Python process stays alive. HTTP 200 returns but browser shows black page. Must restart the dashboard process.
 - **WebSocket 401 after sleep:** After laptop wake, WebSocket reconnects with stale auth. Monitor has retry logic that re-signs on each reconnect attempt, but may need manual restart if the key/API changed.
 - **IOC orders don't fill:** Kalshi markets are thin. IOC (immediate-or-cancel) orders expire immediately if no liquidity. Switched to GTC with slippage adjustment.
+- **OCI SSH background commands:** `pkill -f` sometimes doesn't work cleanly over SSH — may need `kill -9` or `killall -9 python`. Log files may be owned by root from previous runs.
+- **NaN market titles:** Some market titles come back as NaN (float) from DB. Always use `str()` when displaying.
 
-## Mobile Monitoring Options
-- **Pushover:** Already sends ALERT/CRITICAL events + trade fills to phone in real-time
-- **ngrok:** `brew install ngrok && ngrok http 8080` — exposes dashboard to public URL for phone browser access (free tier = random URL each restart, $8/mo for stable subdomain)
-- **Tailscale:** Private VPN mesh between Mac and phone — access `http://your-mac:8080` securely, free for personal use
-- **Cloud deploy:** Heroku NOT recommended (ephemeral filesystem kills SQLite). Consider Fly.io or Render with persistent volumes.
+## OCI Deployment Details
+- **Instance:** Oracle Cloud Infrastructure Compute (Ubuntu, hostname `hmm-trader`)
+- **IP:** `129.158.40.51`
+- **SSH key:** `~/.ssh/hmm-trader.key` (user: `ubuntu`)
+- **Python:** `/home/ubuntu/miniconda3/bin/python` (3.13, miniconda)
+- **Deploy script:** `./deploy.sh` syncs `.py` files via scp; `./deploy.sh --restart` also restarts processes
+- **Manual restart:** `ssh -i ~/.ssh/hmm-trader.key ubuntu@129.158.40.51 'bash -c "cd /home/ubuntu/kalshi-diamond && nohup /home/ubuntu/miniconda3/bin/python diamond_monitor.py > diamond_monitor.log 2>&1 &"'`
+- **Git:** Not set up on OCI yet. GitHub repo exists at `pjnks/kalshi-diamond` but OCI uses scp.
+- **Also running:** CITRINE dashboard on :8070 (separate project)
 
 ## 24/7 Operation
-Running on a laptop is not ideal — closing the lid kills the network connection.
-- **`caffeinate -s`** keeps Mac awake on AC power
-- **`pmset -c sleep 0`** disables sleep when plugged in
-- **Cloud VPS** ($5-6/mo DigitalOcean/Hetzner) is the proper 24/7 solution
+- **Primary:** OCI compute instance (always-on, no lid-close issues)
+- **Secondary:** Mac runs local copy for development/testing
 - Monitor self-heals on wake (WebSocket reconnects, REST re-authenticates)
+- Session recycling prevents stale connection failures after long uptime
+- Pushover alerts on order failures ensure silent failures are caught
 
 ## Next Steps / Roadmap
 - **Collect 50+ settled trades** for meaningful win rate analysis (~1 week)
@@ -227,6 +299,4 @@ Running on a laptop is not ideal — closing the lid kills the network connectio
 - **Burst throttle:** Optional — max N new trades per 5-min window
 - **Score-scaled sizing:** Once win rates known, increase bet size for higher-conviction signals
 - **Kelly criterion sizing:** After sufficient settlement data, size by estimated edge
-
-## Implementation Plan
-See `/Users/perryjenkins/.claude/plans/staged-soaring-blum.md` for full 8-step architectural plan.
+- **Set up git on OCI:** Replace scp deploy with git pull workflow

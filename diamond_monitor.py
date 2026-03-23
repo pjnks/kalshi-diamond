@@ -27,6 +27,9 @@ import time
 
 from diamond_config import (
     ALERT_THRESHOLD_LOG,
+    CONVICTION_ENABLED,
+    CONVICTION_FLIP_THRESHOLD,
+    CONVICTION_HALF_LIFE_SEC,
     METADATA_REFRESH_SEC,
     PAPER_TRADING_ENABLED,
     REST_POLL_INTERVAL_SEC,
@@ -166,6 +169,13 @@ async def on_trade(msg: dict):
         )
         anomaly_count += 1
 
+        # Record signal in conviction tracker (all levels, including during warmup)
+        # so conviction builds from full signal history
+        if paper_engine is not None and paper_engine._conviction is not None:
+            paper_engine._conviction.record_signal(
+                ticker, result["composite"], time.time()
+            )
+
         # Suppress push notifications during warmup (still store anomalies)
         in_warmup = (time.time() - startup_ts) < WARMUP_SEC
         if in_warmup:
@@ -192,6 +202,10 @@ async def on_trade(msg: dict):
                 else:
                     price_cents = 0
                 if taker_side and price_cents:
+                    # Get category from market cache for portfolio intelligence
+                    market_category = ""
+                    if ticker in market_cache:
+                        market_category = market_cache[ticker].get("category", "")
                     await paper_engine.on_anomaly(
                         ticker=ticker,
                         taker_side=taker_side,
@@ -200,6 +214,7 @@ async def on_trade(msg: dict):
                         level=alert_level,
                         features=result,
                         title=market_title,
+                        category=market_category,
                     )
         else:
             log.info(
@@ -308,12 +323,19 @@ async def status_report_loop():
     while running:
         await asyncio.sleep(60)
         stats = store.get_db_stats()
-        log.info(
+        status_msg = (
             f"Status: {trade_count} trades processed, "
             f"{anomaly_count} anomalies, "
             f"DB: {stats['trades']} trades / {stats['anomalies']} anomalies / "
             f"{stats['market_profiles']} profiles"
         )
+        # Conviction tracker cleanup + status
+        if paper_engine is not None and paper_engine._conviction is not None:
+            paper_engine._conviction.cleanup(max_age_sec=3600)
+            if paper_engine._conviction._store is not None:
+                paper_engine._conviction._store.prune_conviction_signals(max_age_sec=7200)
+            status_msg += f", conviction_events={paper_engine._conviction.active_events}"
+        log.info(status_msg)
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -329,7 +351,26 @@ async def main(category: str | None = None):
     # Initialize paper trading engine if enabled
     if PAPER_TRADING_ENABLED:
         import src.diamond_alerts as alerts_module
-        paper_engine = PaperTradingEngine(store, rest, alert_module=alerts_module)
+
+        conviction_tracker = None
+        if CONVICTION_ENABLED:
+            from src.diamond_conviction import ConvictionTracker
+            conviction_tracker = ConvictionTracker(
+                half_life=CONVICTION_HALF_LIFE_SEC,
+                flip_threshold=CONVICTION_FLIP_THRESHOLD,
+                store=store,
+            )
+            # Restore conviction state from SQLite (survives restarts)
+            conviction_tracker.load_recent(max_age_sec=3600)
+            log.info(
+                f"[CONVICTION] Enabled (half_life={CONVICTION_HALF_LIFE_SEC}s, "
+                f"flip_threshold={CONVICTION_FLIP_THRESHOLD})"
+            )
+
+        paper_engine = PaperTradingEngine(
+            store, rest, alert_module=alerts_module,
+            conviction_tracker=conviction_tracker,
+        )
         log.info("[PAPER] Auto-trading enabled")
 
     # Initial market fetch

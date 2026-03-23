@@ -144,6 +144,30 @@ class DiamondStore:
         """)
         self._conn.commit()
 
+        # Add event_id and category columns to paper_trades
+        pt_cols = [row[1] for row in self._conn.execute("PRAGMA table_info(paper_trades)").fetchall()]
+        if "category" not in pt_cols:
+            self._conn.execute("ALTER TABLE paper_trades ADD COLUMN category TEXT")
+            self._conn.commit()
+            log.info("Migration: added 'category' column to paper_trades table")
+        if "event_id" not in pt_cols:
+            self._conn.execute("ALTER TABLE paper_trades ADD COLUMN event_id TEXT")
+            self._conn.commit()
+            log.info("Migration: added 'event_id' column to paper_trades table")
+
+        # Create conviction_signals table for persisting conviction state
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS conviction_signals (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id    TEXT NOT NULL,
+                ticker      TEXT NOT NULL,
+                score       REAL NOT NULL,
+                ts          REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_conviction_event_ts ON conviction_signals(event_id, ts);
+        """)
+        self._conn.commit()
+
     # ── Trade Operations ──────────────────────────────────────────────
 
     def insert_trade(self, trade: dict):
@@ -392,6 +416,52 @@ class DiamondStore:
         d["no_asks"] = json.loads(d["no_asks"])
         return d
 
+    # ── Conviction Persistence ────────────────────────────────────────
+
+    def insert_conviction_signal(self, event_id: str, ticker: str, score: float, ts: float):
+        """Persist a conviction signal to SQLite."""
+        self._conn.execute(
+            "INSERT INTO conviction_signals (event_id, ticker, score, ts) VALUES (?, ?, ?, ?)",
+            (event_id, ticker, score, ts),
+        )
+        self._conn.commit()
+
+    def get_recent_conviction_signals(self, max_age_sec: float = 3600) -> list[dict]:
+        """Load recent conviction signals for state restoration on startup."""
+        cutoff = time.time() - max_age_sec
+        rows = self._conn.execute(
+            "SELECT event_id, ticker, score, ts FROM conviction_signals WHERE ts >= ? ORDER BY ts",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_conviction_signals(self, max_age_sec: float = 7200):
+        """Remove old conviction signals."""
+        cutoff = time.time() - max_age_sec
+        self._conn.execute("DELETE FROM conviction_signals WHERE ts < ?", (cutoff,))
+        self._conn.commit()
+
+    # ── Order Book Snapshots ──────────────────────────────────────────
+
+    def get_book_snapshot_at(self, ticker: str, target_ts: float) -> dict | None:
+        """Get the book snapshot closest to (but not after) target_ts.
+
+        Used for computing book pressure delta — comparing current book
+        to the book state N minutes ago.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM book_snapshots WHERE ticker = ? AND ts <= ? ORDER BY ts DESC LIMIT 1",
+            (ticker, target_ts),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["yes_bids"] = json.loads(d["yes_bids"])
+        d["yes_asks"] = json.loads(d["yes_asks"])
+        d["no_bids"] = json.loads(d["no_bids"])
+        d["no_asks"] = json.loads(d["no_asks"])
+        return d
+
     # ── Paper Trades ─────────────────────────────────────────────────
 
     def insert_paper_trade(
@@ -407,15 +477,17 @@ class DiamondStore:
         features: dict,
         order_id: str | None = None,
         client_order_id: str | None = None,
+        event_id: str | None = None,
+        category: str | None = None,
     ) -> int:
         """Insert a new paper trade record. Returns the row ID."""
         cur = self._conn.execute(
             """INSERT INTO paper_trades
                (order_id, client_order_id, ticker, title, side, action, count,
-                entry_price, anomaly_score, anomaly_level, features_json, opened_at, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                entry_price, anomaly_score, anomaly_level, features_json, opened_at, status, event_id, category)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
             (order_id, client_order_id, ticker, title, side, action, count,
-             entry_price, anomaly_score, anomaly_level, json.dumps(features), time.time()),
+             entry_price, anomaly_score, anomaly_level, json.dumps(features), time.time(), event_id, category),
         )
         self._conn.commit()
         return cur.lastrowid
@@ -457,9 +529,9 @@ class DiamondStore:
     def has_open_position(self, ticker: str) -> bool:
         """Check if there's already an open/pending/recent paper trade for this ticker.
 
-        Also blocks if there was ANY order attempt in the last 30 minutes,
-        to prevent re-ordering when the API response is lost but the order
-        actually went through on Kalshi's side.
+        Blocks if there was ANY order attempt in the last 24 hours on this ticker.
+        This prevents re-entering the same market repeatedly during a game/event
+        that can last several hours. One shot per ticker per day.
         """
         # Check for active positions
         row = self._conn.execute(
@@ -468,13 +540,53 @@ class DiamondStore:
         ).fetchone()
         if row["n"] > 0:
             return True
-        # Block re-orders for 30 min after ANY attempt (including unfilled)
-        cutoff = time.time() - 1800
+        # Block re-orders for 24h after ANY attempt (including unfilled)
+        cutoff = time.time() - 86400
         row2 = self._conn.execute(
             "SELECT COUNT(*) as n FROM paper_trades WHERE ticker = ? AND opened_at >= ?",
             (ticker, cutoff),
         ).fetchone()
         return row2["n"] > 0
+
+    def get_open_position_for_ticker(self, ticker: str) -> dict | None:
+        """Get the open (pending or filled) paper trade for a ticker, if any."""
+        row = self._conn.execute(
+            "SELECT * FROM paper_trades WHERE ticker = ? AND status IN ('pending', 'filled') "
+            "ORDER BY opened_at DESC LIMIT 1",
+            (ticker,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_open_positions_for_event(self, event_id: str) -> list[dict]:
+        """Get all positions (any status) for an event in the last 24 hours.
+
+        Uses a 24-hour window to match the per-ticker dedup. This prevents
+        entering multiple sides of the same event across the full game lifetime.
+        """
+        cutoff = time.time() - 86400
+        rows = self._conn.execute(
+            "SELECT * FROM paper_trades WHERE event_id = ? AND opened_at >= ? "
+            "ORDER BY opened_at DESC",
+            (event_id, cutoff),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_open_positions_by_category(self, category: str) -> int:
+        """Count open positions in a specific market category."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as n FROM paper_trades WHERE category = ? AND status IN ('pending', 'filled')",
+            (category,),
+        ).fetchone()
+        return row["n"]
+
+    def count_recent_paper_trades(self, window_sec: int = 300) -> int:
+        """Count paper trades placed in the last N seconds (burst throttle)."""
+        cutoff = time.time() - window_sec
+        row = self._conn.execute(
+            "SELECT COUNT(*) as n FROM paper_trades WHERE opened_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        return row["n"]
 
     def get_daily_spend_cents(self) -> int:
         """Get total spend (fill_price * fill_count) for today's paper trades."""

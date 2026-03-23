@@ -27,18 +27,29 @@ PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "")
 # sports markets. Need 3+ strong features to reach ALERT.
 ALERT_THRESHOLD_LOG = 0.25      # SQLite only
 ALERT_THRESHOLD_NOTABLE = 0.45  # macOS notification
-ALERT_THRESHOLD_ALERT = 0.65    # Pushover push
+ALERT_THRESHOLD_ALERT = 0.55    # Pushover push + triggers trade
 ALERT_THRESHOLD_CRITICAL = 0.78 # Emergency Pushover (repeat)
 
 # ── Feature Weights (sum to 1.0) ──────────────────────────────────────────
+# 10 features: original 6 + advanced 4 (sweep, velocity, concentration, book delta)
+# Weights tuned based on firing rate analysis (March 22):
+#   - zscore/vol_spike fire on 94-99% of ALERTs — not differentiating, weight reduced
+#   - skew/velocity/sweep are selective and high-conviction — weight increased
 FEATURE_WEIGHTS = {
-    "trade_size_zscore": 0.30,
-    "volume_spike_ratio": 0.20,
-    "order_book_imbalance": 0.20,
-    "taker_side_skew": 0.15,
-    "price_impact": 0.10,
-    "cross_market_correlation": 0.05,
+    "trade_size_zscore": 0.12,     # Reduced: fires 94% — baseline, not differentiating
+    "volume_spike_ratio": 0.10,    # Reduced: fires 99% — baseline, not differentiating
+    "order_book_imbalance": 0.12,  # Kept: selective (9.6%), very strong when fires (0.91)
+    "taker_side_skew": 0.20,       # Increased: fires 70%, high signal (0.79)
+    "price_impact": 0.05,          # Reduced: rarely fires (1.6%), weak signal
+    "cross_market_correlation": 0.03,  # Kept: rare but meaningful
+    "sweep_score": 0.15,           # Increased: selective (16%), strong (0.73)
+    "trade_velocity": 0.12,        # Increased: selective (28%), extremely strong (0.98)
+    "size_concentration": 0.05,    # Kept: fires weak (0.28), needs more data
+    "book_pressure_delta": 0.06,   # Increased: needs to contribute once fixed
 }
+
+# Per-feature enable/disable toggles
+FEATURE_ENABLED = {name: True for name in FEATURE_WEIGHTS}
 
 # ── Rolling Windows ──────────────────────────────────────────────────────
 ROLLING_WINDOW_1H = 3600
@@ -66,3 +77,14 @@ PAPER_MAX_UNREALIZED_CENTS = int(os.getenv("PAPER_MAX_UNREALIZED_CENTS", "2000")
 PAPER_POLL_INTERVAL_SEC = int(os.getenv("PAPER_POLL_INTERVAL_SEC", "120"))
 PAPER_NOTIFY_TRADES = os.getenv("PAPER_NOTIFY_TRADES", "true").lower() == "true"
 PAPER_MIN_PRICE_CENTS = int(os.getenv("PAPER_MIN_PRICE_CENTS", "5"))  # Skip trades ≤ this price
+PAPER_STALE_ORDER_SEC = int(os.getenv("PAPER_STALE_ORDER_SEC", "3600"))  # Cancel GTC orders older than 1 hour
+
+# ── Portfolio Intelligence ──────────────────────────────────────────
+PAPER_MAX_PER_CATEGORY = int(os.getenv("PAPER_MAX_PER_CATEGORY", "15"))
+PAPER_MAX_PER_EVENT = int(os.getenv("PAPER_MAX_PER_EVENT", "1"))
+PAPER_MAX_TRADES_PER_5MIN = int(os.getenv("PAPER_MAX_TRADES_PER_5MIN", "8"))
+
+# ── Conviction System (Event-Aware Trade Management) ───────────────
+CONVICTION_ENABLED = os.getenv("CONVICTION_ENABLED", "false").lower() == "true"
+CONVICTION_HALF_LIFE_SEC = float(os.getenv("CONVICTION_HALF_LIFE_SEC", "420"))  # 7 minutes
+CONVICTION_FLIP_THRESHOLD = float(os.getenv("CONVICTION_FLIP_THRESHOLD", "0.4"))

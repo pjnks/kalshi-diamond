@@ -169,11 +169,11 @@ def dispatch_alert(
 
     elif alert_level == "ALERT":
         _macos_notify(title, message, sound="Basso")
-        _pushover(title, message, priority=1)
+        _pushover(title, message, priority=0)
 
     elif alert_level == "CRITICAL":
         _macos_notify(title, message, sound="Basso")
-        _pushover(title, message, priority=2)
+        _pushover(title, message, priority=1)
         _terminal_bell()
 
     _record_alert(ticker, alert_level)
@@ -198,6 +198,28 @@ def notify_trade_settled(ticker: str, pnl_cents: float, title: str = ""):
     _pushover(msg_title, message, priority=0 if won else -1)
     _macos_notify(msg_title, message, sound="Glass" if won else "Basso")
     log.info(f"[PAPER] Notified settlement: {ticker} pnl={pnl_cents:+.0f}¢")
+
+
+def notify_trade_flipped(
+    ticker_exited: str,
+    ticker_entered: str,
+    exit_pnl_cents: float,
+    entry_price: int,
+    conviction_old: float,
+    conviction_new: float,
+    title: str = "",
+):
+    """Send notification when conviction system flips a position."""
+    name_part = f" ({title})" if title else ""
+    msg_title = f"DIAMOND Flip: {ticker_exited} → {ticker_entered}"
+    message = (
+        f"Exited {ticker_exited} (P&L: {exit_pnl_cents:+.0f}¢)\n"
+        f"Entering {ticker_entered} @ {entry_price}¢{name_part}\n"
+        f"Conviction: {conviction_old:.2f} → {conviction_new:.2f}"
+    )
+    _pushover(msg_title, message, priority=0)
+    _macos_notify(msg_title, message, sound="Submarine")
+    log.info(f"[PAPER] Notified flip: {ticker_exited} → {ticker_entered}")
 
 
 def test_alert():

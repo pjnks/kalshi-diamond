@@ -1,10 +1,15 @@
 """
 diamond_features.py
 ───────────────────
-Six anomaly detection features for DIAMOND.
+Ten anomaly detection features for DIAMOND.
 
 Each feature produces a score 0-1. Composite score is a weighted combination.
 Features are computed per-trade against rolling market profiles.
+
+Features 1-6: Original (trade size, volume spike, book imbalance, taker skew,
+              price impact, cross-market correlation)
+Features 7-10: Advanced (sweep detection, trade velocity, size concentration,
+               book pressure delta)
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import math
 import time
 
 from diamond_config import (
+    FEATURE_ENABLED,
     FEATURE_WEIGHTS,
     ROLLING_WINDOW_1H,
     ROLLING_WINDOW_24H,
@@ -156,6 +162,145 @@ def cross_market_correlation(
     return _clamp(score)
 
 
+def sweep_score(recent_trades: list[dict], current_side: str) -> float:
+    """
+    Feature 7: Is someone eating through multiple price levels rapidly?
+
+    A sweep occurs when a taker lifts through consecutive ask levels in quick
+    succession — the hallmark of an informed trader who needs size NOW.
+    Scores by number of distinct price levels crossed on the same taker side.
+    """
+    if not recent_trades or not current_side:
+        return 0.0
+
+    now = time.time()
+    # Filter to matching taker side in the last 60 seconds
+    side_trades = [
+        t for t in recent_trades
+        if t.get("taker_side") == current_side and (now - t.get("ts", 0)) <= 60
+    ]
+
+    if len(side_trades) < 3:
+        return 0.0  # Need at least 3 trades to detect a sweep
+
+    # Sort by timestamp, extract prices
+    side_trades.sort(key=lambda t: t.get("ts", 0))
+    price_key = "yes_price" if current_side == "yes" else "no_price"
+    prices = []
+    for t in side_trades:
+        p = t.get(price_key)
+        if p is not None:
+            prices.append(float(p))
+
+    if len(prices) < 3:
+        return 0.0
+
+    # Count consecutive price level increases (sweep up) or decreases (sweep down)
+    # Take the longer of up-sweep or down-sweep
+    up_levels = 1
+    down_levels = 1
+    max_up = 1
+    max_down = 1
+    for i in range(1, len(prices)):
+        if prices[i] > prices[i - 1]:
+            up_levels += 1
+            max_up = max(max_up, up_levels)
+            down_levels = 1
+        elif prices[i] < prices[i - 1]:
+            down_levels += 1
+            max_down = max(max_down, down_levels)
+            up_levels = 1
+        # Equal prices don't break the streak
+
+    sweep_levels = max(max_up, max_down)
+    if sweep_levels < 2:
+        return 0.0
+
+    # Score by sweep depth: 2=0.2, 3=0.5, 4=0.8, 5+=1.0
+    score = min(1.0, (sweep_levels - 1) / 4.0)
+
+    # Speed bonus: if trades are < 2s apart on average, boost signal
+    if len(side_trades) >= 2:
+        avg_interval = (side_trades[-1]["ts"] - side_trades[0]["ts"]) / (len(side_trades) - 1)
+        if avg_interval < 2.0:
+            score = min(1.0, score * 1.2)
+
+    return _clamp(score)
+
+
+def trade_velocity(trades_last_30s: int, avg_trades_per_30s: float) -> float:
+    """
+    Feature 8: Is the trade frequency abnormally high right now?
+
+    Detects burst activity — many trades in a very short window. Different
+    from volume_spike_ratio which measures 1-hour contract volume.
+    This catches rapid-fire small trades that indicate algo activity or panic.
+    """
+    if avg_trades_per_30s <= 0:
+        return 0.0
+    ratio = trades_last_30s / max(avg_trades_per_30s, 0.5)
+    if ratio < 3.0:
+        return 0.0  # Up to 3x is normal variance
+    # Log scale: 3x→0.3, 5x→0.5, 10x→0.8, 20x→1.0
+    score = math.log(ratio) / math.log(20)
+    return _clamp(score)
+
+
+def size_concentration(recent_trades: list[dict], top_n: int = 3) -> float:
+    """
+    Feature 9: Is volume concentrated in a few large trades (whale detection)?
+
+    Normal markets have distributed trade sizes. When 80%+ of volume comes
+    from 2-3 trades, that's likely a single large participant — informed money.
+    """
+    if len(recent_trades) < 10:
+        return 0.0  # Need enough trades for concentration to be meaningful
+
+    sizes = sorted([t.get("count", 1) for t in recent_trades], reverse=True)
+    total_vol = sum(sizes)
+    if total_vol <= 0:
+        return 0.0
+
+    top_vol = sum(sizes[:top_n])
+    concentration = top_vol / total_vol
+
+    if concentration < 0.5:
+        return 0.0  # Normal distribution
+    # Rescale 0.5-1.0 → 0-1
+    score = (concentration - 0.5) / 0.5
+    return _clamp(score)
+
+
+def book_pressure_delta(
+    current_yes_depth: float, current_no_depth: float,
+    prev_yes_depth: float, prev_no_depth: float,
+) -> float:
+    """
+    Feature 10: Is the order book balance CHANGING rapidly?
+
+    Static imbalance can be normal (market lean). But a large *shift* in
+    imbalance over a short period indicates new positioning activity —
+    someone is building a wall or pulling liquidity.
+    """
+    cur_total = current_yes_depth + current_no_depth
+    prev_total = prev_yes_depth + prev_no_depth
+
+    # Require some depth in both snapshots (lowered from 200 to 20 —
+    # most sports markets have thin books but shifts are still meaningful)
+    if cur_total < 20 or prev_total < 20:
+        return 0.0
+
+    imbalance_now = (current_yes_depth - current_no_depth) / cur_total
+    imbalance_prev = (prev_yes_depth - prev_no_depth) / prev_total
+    delta = abs(imbalance_now - imbalance_prev)
+
+    if delta < 0.10:
+        return 0.0  # Normal fluctuation (lowered from 0.15)
+    # Rescale: 0.10→0.0, 0.25→0.43, 0.45→1.0
+    score = (delta - 0.10) / 0.35
+    return _clamp(score)
+
+
 # ── Composite Score ───────────────────────────────────────────────────
 
 
@@ -266,20 +411,55 @@ class FeatureEngine:
         # Short window prevents stale anomalies from inflating correlation
         recent_anomalies = self._store.count_recent_anomalies(window_sec=60)
 
-        # Compute features
-        features = {
-            "trade_size_zscore": trade_size_zscore(trade_count, mean_size, std_size),
-            "volume_spike_ratio": volume_spike_ratio(vol_1h, avg_hourly),
-            "order_book_imbalance": order_book_imbalance(yes_depth, no_depth),
-            "taker_side_skew": taker_side_skew(yes_ratio, trades_in_1h),
-            "price_impact": price_impact(
-                self._last_price.get(ticker),
-                trade.get("yes_price"),
-            ),
-            "cross_market_correlation": cross_market_correlation(
+        # ── Compute original 6 features ──────────────────────────────
+        features = {}
+
+        if FEATURE_ENABLED.get("trade_size_zscore", True):
+            features["trade_size_zscore"] = trade_size_zscore(trade_count, mean_size, std_size)
+        if FEATURE_ENABLED.get("volume_spike_ratio", True):
+            features["volume_spike_ratio"] = volume_spike_ratio(vol_1h, avg_hourly)
+        if FEATURE_ENABLED.get("order_book_imbalance", True):
+            features["order_book_imbalance"] = order_book_imbalance(yes_depth, no_depth)
+        if FEATURE_ENABLED.get("taker_side_skew", True):
+            features["taker_side_skew"] = taker_side_skew(yes_ratio, trades_in_1h)
+        if FEATURE_ENABLED.get("price_impact", True):
+            features["price_impact"] = price_impact(
+                self._last_price.get(ticker), trade.get("yes_price"),
+            )
+        if FEATURE_ENABLED.get("cross_market_correlation", True):
+            features["cross_market_correlation"] = cross_market_correlation(
                 ticker, recent_anomalies
-            ),
-        }
+            )
+
+        # ── Compute advanced features (7-10) ─────────────────────────
+        now = time.time()
+        taker_side = trade.get("taker_side", "")
+
+        if FEATURE_ENABLED.get("sweep_score", True):
+            features["sweep_score"] = sweep_score(recent_trades, taker_side)
+
+        if FEATURE_ENABLED.get("trade_velocity", True):
+            trades_30s = sum(1 for t in recent_trades if (now - t.get("ts", 0)) <= 30)
+            # Baseline: average trades per 30s from 24h profile
+            trade_count_24h = profile.get("trade_count_24h", 0) if has_baseline else 0
+            avg_per_30s = trade_count_24h / 2880.0 if trade_count_24h > 0 else 0
+            features["trade_velocity"] = trade_velocity(trades_30s, avg_per_30s)
+
+        if FEATURE_ENABLED.get("size_concentration", True):
+            # Use last 5 minutes of trades for concentration
+            trades_5m = [t for t in recent_trades if (now - t.get("ts", 0)) <= 300]
+            features["size_concentration"] = size_concentration(trades_5m)
+
+        if FEATURE_ENABLED.get("book_pressure_delta", True):
+            prev_book = self._store.get_book_snapshot_at(ticker, now - 300)
+            if book and prev_book:
+                prev_yes = sum(float(l[1]) for l in prev_book.get("yes_bids", []) if l)
+                prev_no = sum(float(l[1]) for l in prev_book.get("no_bids", []) if l)
+                features["book_pressure_delta"] = book_pressure_delta(
+                    yes_depth, no_depth, prev_yes, prev_no
+                )
+            else:
+                features["book_pressure_delta"] = 0.0
 
         composite = compute_composite_score(features)
         features["composite"] = composite

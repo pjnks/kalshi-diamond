@@ -389,6 +389,18 @@ def default_param_grid() -> dict:
              "order_book_imbalance": 0.25, "taker_side_skew": 0.20,
              "price_impact": 0.10, "cross_market_correlation": 0.05},
         ],
+        # ── Conviction params — uncomment when 100+ settlements exist ──
+        # Sweep over half_life (decay speed) and flip_threshold (conviction
+        # advantage needed to justify exiting + re-entering).
+        # "conviction": [
+        #     {"half_life": 180, "flip_threshold": 0.3},   # Fast decay, easy flip
+        #     {"half_life": 300, "flip_threshold": 0.3},   # 5 min, easy flip
+        #     {"half_life": 300, "flip_threshold": 0.5},   # 5 min, harder flip
+        #     {"half_life": 420, "flip_threshold": 0.4},   # 7 min (default)
+        #     {"half_life": 600, "flip_threshold": 0.4},   # 10 min
+        #     {"half_life": 600, "flip_threshold": 0.6},   # 10 min, hard flip
+        #     {"half_life": 900, "flip_threshold": 0.5},   # 15 min, moderate
+        # ],
     }
 
 
