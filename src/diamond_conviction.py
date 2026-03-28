@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -123,7 +124,9 @@ class ConvictionTracker:
         self._half_life = half_life
         self._flip_threshold = flip_threshold
         self._store = store
-        self._events: dict[str, EventConviction] = {}  # event_id → EventConviction
+        self._events: OrderedDict[str, EventConviction] = OrderedDict()  # event_id → EventConviction
+        self._MAX_EVENTS = 10000
+        self._MAX_ENTRIES_PER_EVENT = 100
 
     @staticmethod
     def extract_event_id(ticker: str) -> str:
@@ -153,10 +156,21 @@ class ConvictionTracker:
         event_id = self.extract_event_id(ticker)
         if event_id not in self._events:
             self._events[event_id] = EventConviction(event_id=event_id)
+        else:
+            # Move to end (most recently used)
+            self._events.move_to_end(event_id)
 
         self._events[event_id].entries.append(
             ConvictionEntry(score=score, timestamp=timestamp, ticker=ticker)
         )
+
+        # Trim per-event entries to last MAX_ENTRIES_PER_EVENT
+        if len(self._events[event_id].entries) > self._MAX_ENTRIES_PER_EVENT:
+            self._events[event_id].entries = self._events[event_id].entries[-self._MAX_ENTRIES_PER_EVENT:]
+
+        # Evict oldest events if over cap
+        while len(self._events) > self._MAX_EVENTS:
+            self._events.popitem(last=False)
 
         # Persist to SQLite for restart recovery
         if self._store is not None:
@@ -268,11 +282,12 @@ class ConvictionTracker:
         """Get conviction state for a specific event (for dashboard/debugging)."""
         return self._events.get(event_id)
 
-    def cleanup(self, max_age_sec: float = 3600.0) -> int:
+    def cleanup(self, max_age_sec: float = 1800.0) -> int:
         """Remove stale events with no recent entries.
 
         Args:
-            max_age_sec: Remove events where ALL entries are older than this.
+            max_age_sec: Remove events where the NEWEST entry is older than this.
+                         Default 1800s (30 min) — aggressive to bound memory.
 
         Returns:
             Number of events removed.

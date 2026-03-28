@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
+import fcntl
 import logging
+import os
 import signal
 import sys
 import time
@@ -34,6 +37,7 @@ from diamond_config import (
     PAPER_TRADING_ENABLED,
     REST_POLL_INTERVAL_SEC,
 )
+from src.bounded_dict import BoundedDict
 from src.diamond_alerts import dispatch_alert
 from src.diamond_features import FeatureEngine
 from src.diamond_paper import PaperTradingEngine
@@ -48,34 +52,43 @@ store = DiamondStore()
 rest = KalshiRESTClient()
 features = None  # Initialized after store.connect()
 paper_engine: PaperTradingEngine | None = None  # Initialized if PAPER_TRADING_ENABLED
-market_cache: dict[str, dict] = {}  # ticker → market metadata
+market_cache = BoundedDict(max_size=3000)  # ticker → market metadata
 running = True
 test_mode = False
 trade_count = 0
 anomaly_count = 0
 startup_ts = 0.0  # Set when live streaming begins
+last_trade_ts = 0.0  # Timestamp of most recent trade received (for stale detection)
 WARMUP_SEC = 180  # 3 min warmup — score trades but suppress alerts
+DATA_STALE_SEC = 300  # 5 min with no trades → log STALE warning + force reconnect
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
-_cache_fetch_failures: set[str] = set()  # Tickers we already failed to fetch (avoid re-trying every trade)
+_cache_fetch_failures: dict[str, float] = {}  # ticker → fail_timestamp (time-based expiry)
+_CACHE_FAILURE_EXPIRY_SEC = 3600  # Re-try failed fetches after 60 minutes
 
 
 async def _ensure_cached(ticker: str) -> None:
     """Lazy-fetch market details into market_cache if missing."""
     global market_cache
-    if ticker in market_cache or ticker in _cache_fetch_failures:
+    if ticker in market_cache:
+        return
+    # Check if failure is still fresh (skip if < 60 min old)
+    fail_ts = _cache_fetch_failures.get(ticker)
+    if fail_ts is not None and (time.time() - fail_ts) < _CACHE_FAILURE_EXPIRY_SEC:
         return
     try:
         market = await rest.get_market(ticker)
         if market:
             market_cache[ticker] = market
+            # Remove from failures if previously failed
+            _cache_fetch_failures.pop(ticker, None)
             title = _market_display_name(market)
             store.update_market_profile(ticker, title=title)
             log.info(f"Lazy-cached market: {ticker} → {title}")
     except Exception as e:
-        _cache_fetch_failures.add(ticker)
+        _cache_fetch_failures[ticker] = time.time()
         log.debug(f"Lazy-cache miss for {ticker}: {e}")
 
 
@@ -121,8 +134,8 @@ def _normalize_trade(raw: dict) -> dict:
     # prices: WS sends "*_dollars" as strings, REST sends cents as ints
     yes_p = raw.get("yes_price_dollars") or raw.get("yes_price")
     no_p = raw.get("no_price_dollars") or raw.get("no_price")
-    trade["yes_price"] = float(yes_p) * 100 if yes_p and float(yes_p) < 10 else yes_p
-    trade["no_price"] = float(no_p) * 100 if no_p and float(no_p) < 10 else no_p
+    trade["yes_price"] = float(yes_p) * 100 if yes_p and float(yes_p) < 10 else (float(yes_p) if yes_p else None)
+    trade["no_price"] = float(no_p) * 100 if no_p and float(no_p) < 10 else (float(no_p) if no_p else None)
 
     # timestamp
     trade["ts"] = raw.get("ts", time.time())
@@ -132,7 +145,7 @@ def _normalize_trade(raw: dict) -> dict:
 
 async def on_trade(msg: dict):
     """Process an incoming WebSocket trade message."""
-    global trade_count, anomaly_count
+    global trade_count, anomaly_count, last_trade_ts
 
     # WS format: {"type": "trade", "msg": {single trade dict}}
     raw_trade = msg.get("msg", msg)
@@ -145,6 +158,7 @@ async def on_trade(msg: dict):
     # Store the trade
     store.insert_trade(trade)
     trade_count += 1
+    last_trade_ts = time.time()
 
     # Compute features
     result = features.compute(trade)
@@ -203,9 +217,9 @@ async def on_trade(msg: dict):
                     price_cents = 0
                 if taker_side and price_cents:
                     # Get category from market cache for portfolio intelligence
-                    market_category = ""
+                    market_category = None
                     if ticker in market_cache:
-                        market_category = market_cache[ticker].get("category", "")
+                        market_category = market_cache[ticker].get("category") or None
                     await paper_engine.on_anomaly(
                         ticker=ticker,
                         taker_side=taker_side,
@@ -252,7 +266,7 @@ async def refresh_markets(category: str | None = None):
     log.info(f"Discovered {len(active_tickers)} active tickers from recent trades")
 
     # Step 2: Fetch individual market details for each active ticker
-    new_cache: dict[str, dict] = {}
+    new_cache = BoundedDict(max_size=3000)
     for i, ticker in enumerate(active_tickers):
         try:
             market = await rest.get_market(ticker)
@@ -276,7 +290,12 @@ async def metadata_refresh_loop(category: str | None = None):
     """Periodically refresh market metadata and recompute profiles."""
     while running:
         try:
-            _cache_fetch_failures.clear()  # Reset lazy-fetch failures each refresh cycle
+            # Prune expired fetch failures (older than 60 min) instead of clearing all
+            now = time.time()
+            stale_keys = [k for k, ts in _cache_fetch_failures.items()
+                          if (now - ts) > _CACHE_FAILURE_EXPIRY_SEC]
+            for k in stale_keys:
+                del _cache_fetch_failures[k]
             await refresh_markets(category)
 
             # Update market profiles for active tickers (with display names from cache)
@@ -319,30 +338,58 @@ async def orderbook_poll_loop():
 
 
 async def status_report_loop():
-    """Print periodic status to terminal."""
+    """Print periodic status and detect stale data.
+
+    If no trades arrive for DATA_STALE_SEC (5 min), logs a WARNING-level
+    STALE message (visible to the watchdog as a problem signal) and cancels
+    the WebSocket task to force a reconnect.
+    """
+    _prev_trade_count = 0
     while running:
         await asyncio.sleep(60)
         stats = store.get_db_stats()
-        status_msg = (
-            f"Status: {trade_count} trades processed, "
-            f"{anomaly_count} anomalies, "
-            f"DB: {stats['trades']} trades / {stats['anomalies']} anomalies / "
-            f"{stats['market_profiles']} profiles"
-        )
-        # Conviction tracker cleanup + status
-        if paper_engine is not None and paper_engine._conviction is not None:
-            paper_engine._conviction.cleanup(max_age_sec=3600)
-            if paper_engine._conviction._store is not None:
-                paper_engine._conviction._store.prune_conviction_signals(max_age_sec=7200)
-            status_msg += f", conviction_events={paper_engine._conviction.active_events}"
-        log.info(status_msg)
+
+        # Detect stale WebSocket: no new trades for DATA_STALE_SEC
+        now = time.time()
+        since_last_trade = now - last_trade_ts if last_trade_ts > 0 else now - startup_ts
+        is_stale = since_last_trade > DATA_STALE_SEC and (now - startup_ts) > WARMUP_SEC
+
+        if is_stale:
+            stale_min = int(since_last_trade / 60)
+            log.warning(
+                f"STALE: no trades for {stale_min}min — WebSocket likely hung. "
+                f"trades={trade_count}, anomalies={anomaly_count}"
+            )
+            # Force-cancel the WebSocket task so it reconnects
+            if _ws_task_ref is not None and not _ws_task_ref.done():
+                log.warning("Cancelling stale WebSocket task to force reconnect")
+                _ws_task_ref.cancel()
+        else:
+            new_trades = trade_count - _prev_trade_count
+            status_msg = (
+                f"Status: {trade_count} trades (+{new_trades}/min), "
+                f"{anomaly_count} anomalies, "
+                f"DB: {stats['trades']} trades / {stats['anomalies']} anomalies / "
+                f"{stats['market_profiles']} profiles"
+            )
+            # Conviction tracker cleanup + status
+            if paper_engine is not None and paper_engine._conviction is not None:
+                paper_engine._conviction.cleanup(max_age_sec=1800)
+                if paper_engine._conviction._store is not None:
+                    paper_engine._conviction._store.prune_conviction_signals(max_age_sec=7200)
+                status_msg += f", conviction_events={paper_engine._conviction.active_events}"
+            log.info(status_msg)
+
+        _prev_trade_count = trade_count
 
 
 # ── Main ──────────────────────────────────────────────────────────────
 
 
+_ws_task_ref: asyncio.Task | None = None  # Reference for stale-detection cancel
+
 async def main(category: str | None = None):
-    global features, running, startup_ts, paper_engine
+    global features, running, startup_ts, paper_engine, _ws_task_ref
 
     # Initialize store
     store.connect()
@@ -419,6 +466,35 @@ async def main(category: str | None = None):
     if paper_engine is not None:
         tasks.append(asyncio.create_task(paper_engine.poll_loop()))
 
+    # ML scorer daily retrain (if enabled)
+    try:
+        from diamond_config import ML_SCORER_ENABLED, ML_MODEL_PATH, DB_PATH, ML_MIN_SAMPLES
+        if ML_SCORER_ENABLED:
+            async def ml_retrain_loop():
+                """Retrain ML model daily as more trades settle."""
+                await asyncio.sleep(300)  # Wait 5 min after startup
+                while running:
+                    try:
+                        from src.diamond_ml import DiamondMLScorer
+                        scorer = DiamondMLScorer(db_path=DB_PATH, model_path=ML_MODEL_PATH)
+                        metrics = scorer.train(min_samples=ML_MIN_SAMPLES)
+                        if "error" not in metrics:
+                            log.info(f"[ML] Retrained: {metrics['model_type']}, "
+                                     f"Brier={metrics['cv_brier']:.4f}, "
+                                     f"AUC={metrics['cv_auc']:.3f}, "
+                                     f"n={metrics['n_samples']}")
+                            # Reload in feature engine
+                            if features and hasattr(features, '_ml_scorer') and features._ml_scorer:
+                                features._ml_scorer.load_model()
+                        else:
+                            log.info(f"[ML] Retrain skipped: {metrics.get('error')}")
+                    except Exception as e:
+                        log.error(f"[ML] Retrain failed: {e}")
+                    await asyncio.sleep(86400)  # Daily
+            tasks.append(asyncio.create_task(ml_retrain_loop()))
+    except ImportError:
+        pass
+
     # Start WebSocket — subscribe in batches (WS may have limits)
     ws = KalshiWSClient(on_trade=on_trade)
     BATCH_SIZE = 100
@@ -426,23 +502,35 @@ async def main(category: str | None = None):
     remaining = tickers[BATCH_SIZE:]
 
     async def ws_with_subscribe():
-        # connect() handles reconnection internally
-        # We subscribe to first batch on connect; remaining via REST-discovered refreshes
-        await ws.connect(tickers=first_batch, channels=["trade"])
+        """WebSocket connection loop — auto-restarts if cancelled by stale detection."""
+        while running:
+            try:
+                # connect() handles reconnection internally for normal errors;
+                # stale detection cancels this task to force a full restart
+                await ws.connect(tickers=first_batch, channels=["trade"])
+            except asyncio.CancelledError:
+                if not running:
+                    raise  # Clean shutdown — propagate
+                log.warning("WebSocket task cancelled (stale detection) — restarting in 5s")
+                await asyncio.sleep(5)
+                continue
 
     ws_task = asyncio.create_task(ws_with_subscribe())
+    _ws_task_ref = ws_task
     tasks.append(ws_task)
 
-    # Handle shutdown
-    def shutdown(sig, frame):
+    # Handle shutdown — use asyncio-safe signal handlers (not signal.signal)
+    loop = asyncio.get_running_loop()
+
+    def shutdown(sig_name: str):
         global running
         running = False
-        log.info(f"Received {sig}, shutting down...")
+        log.info(f"Received {sig_name}, shutting down...")
         for t in tasks:
             t.cancel()
 
-    signal.signal(signal.SIGINT, lambda s, f: shutdown(s, f))
-    signal.signal(signal.SIGTERM, lambda s, f: shutdown(s, f))
+    for sig_enum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig_enum, shutdown, sig_enum.name)
 
     # Wait for all tasks
     try:
@@ -476,6 +564,22 @@ def cli():
 
     global test_mode
     test_mode = args.test
+
+    # ── PID lock: prevent duplicate monitor instances ──
+    lockfile_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".diamond_monitor.lock")
+    lock_fd = open(lockfile_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("FATAL: Another diamond_monitor is already running. Exiting.", file=sys.stderr)
+        sys.exit(1)
+    lock_fd.write(str(os.getpid()))
+    lock_fd.flush()
+    atexit.register(lambda: os.unlink(lockfile_path))
+
+    # Suppress sklearn feature-name warnings that flood the logs
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
     logging.basicConfig(
         level=logging.INFO,

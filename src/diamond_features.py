@@ -23,7 +23,10 @@ from diamond_config import (
     FEATURE_WEIGHTS,
     ROLLING_WINDOW_1H,
     ROLLING_WINDOW_24H,
+    SCORER_WEIGHTS,
+    TRIGGER_FEATURES,
 )
+from src.bounded_dict import BoundedDict
 
 log = logging.getLogger(__name__)
 
@@ -304,19 +307,33 @@ def book_pressure_delta(
 # ── Composite Score ───────────────────────────────────────────────────
 
 
-def compute_composite_score(features: dict[str, float]) -> float:
-    """
-    Weighted combination of feature scores, with mild redistribution from
-    dead features to active ones.
+def compute_composite_score(
+    features: dict[str, float],
+    price_cents: float | None = None,
+) -> float:
+    """Two-stage scoring: trigger gate → weighted discriminative score.
 
-    Redistribution is capped at 1.5× to prevent two low-weight features
-    from inflating the score to CRITICAL. This means you need at least 3+
-    strong features or 2+ high-weight features to reach ALERT/CRITICAL.
+    Stage 1 (Gate): Both trigger features (trade_size_zscore, volume_spike_ratio)
+    must fire (score > 0). These fire on 94-99% of ALERTs and have zero
+    discriminative power within the ALERT set — necessary conditions, not predictors.
+
+    Stage 2 (Score): Weighted combination of 8 discriminative features with
+    redistribution from inactive to active (capped 1.5×, 1.3× if <3 features).
+
+    Probability penalty: Low-probability contracts require proportionally higher
+    raw scores. Replaces hard min-price cutoff with continuous penalty visible
+    in anomaly logging. PhD review (March 2025).
     """
+    # ── Stage 1: Trigger gate ──────────────────────────────────────
+    for trigger in TRIGGER_FEATURES:
+        if features.get(trigger, 0.0) <= 0:
+            return 0.0
+
+    # ── Stage 2: Discriminative scoring ────────────────────────────
     active_weight = 0.0
     active_count = 0
     raw_score = 0.0
-    for name, weight in FEATURE_WEIGHTS.items():
+    for name, weight in SCORER_WEIGHTS.items():
         val = features.get(name, 0.0)
         raw_score += weight * val
         if val > 0:
@@ -327,15 +344,24 @@ def compute_composite_score(features: dict[str, float]) -> float:
         return 0.0
 
     # Redistribute: scale up, but cap at 1.5× to prevent inflation
-    # from just 1-2 weak features firing
-    total_weight = sum(FEATURE_WEIGHTS.values())
+    total_weight = sum(SCORER_WEIGHTS.values())
     redistribution = min(total_weight / active_weight, 1.5)
 
-    # Mild penalty: need 3+ features firing for full redistribution
+    # Need 3+ discriminative features for full redistribution (3/8 = 37.5%)
     if active_count < 3:
         redistribution = min(redistribution, 1.3)
 
     score = raw_score * redistribution
+
+    # ── Probability-conditioned penalty ────────────────────────────
+    # Longshots require higher anomaly scores to reach ALERT.
+    # A 20c contract needs raw score 0.55 × 1.35 = 0.74 to trigger.
+    if price_cents is not None and price_cents > 0:
+        if price_cents < 25:
+            score = score / 1.35
+        elif price_cents < 50:
+            score = score / 1.15
+
     return _clamp(score)
 
 
@@ -371,7 +397,17 @@ class FeatureEngine:
 
     def __init__(self, store):
         self._store = store
-        self._last_price: dict[str, float] = {}  # ticker → last yes_price
+        self._last_price = BoundedDict(max_size=5000)  # ticker → last yes_price
+        self._ml_scorer = None
+        try:
+            from diamond_config import ML_SCORER_ENABLED, ML_MODEL_PATH, DB_PATH
+            if ML_SCORER_ENABLED:
+                from src.diamond_ml import DiamondMLScorer
+                self._ml_scorer = DiamondMLScorer(db_path=DB_PATH, model_path=ML_MODEL_PATH)
+                if not self._ml_scorer.load_model():
+                    log.info("ML scorer enabled but no model file yet — will log -999")
+        except Exception as e:
+            log.warning(f"ML scorer init failed: {e}")
 
     def compute(self, trade: dict) -> dict:
         """
@@ -461,9 +497,33 @@ class FeatureEngine:
             else:
                 features["book_pressure_delta"] = 0.0
 
-        composite = compute_composite_score(features)
+        # Get entry price for probability-conditioned penalty
+        entry_price_cents = trade.get("yes_price") or trade.get("no_price")
+        if entry_price_cents is not None:
+            entry_price_cents = float(entry_price_cents)
+
+        composite = compute_composite_score(features, price_cents=entry_price_cents)
         features["composite"] = composite
         features["alert_level"] = classify_alert_level(composite)
+
+        # ML edge score (always compute for A/B logging if scorer loaded)
+        ml_edge = -999.0
+        if self._ml_scorer is not None and self._ml_scorer.is_ready:
+            entry_price = trade.get("yes_price") or trade.get("no_price") or 50
+            ml_edge = self._ml_scorer.predict(features, int(entry_price))
+        features["ml_edge"] = ml_edge
+
+        try:
+            from diamond_config import ML_SCORER_ACTIVE
+            if ML_SCORER_ACTIVE and ml_edge > -999:
+                # Convert edge to score-like value for alert classification
+                features["composite"] = max(0.0, min(1.0, 0.5 + ml_edge))
+                features["alert_level"] = classify_alert_level(features["composite"])
+                features["score_source"] = "ml"
+            else:
+                features["score_source"] = "handtuned"
+        except ImportError:
+            features["score_source"] = "handtuned"
 
         # Track last price for price_impact on next trade
         yes_p = trade.get("yes_price")

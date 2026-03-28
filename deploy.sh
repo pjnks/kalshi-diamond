@@ -23,17 +23,17 @@ scp -i "$OCI_KEY" \
 echo "Files synced."
 
 if [ "$1" = "--restart" ]; then
-  echo "Restarting monitor and dashboard..."
+  echo "Restarting monitor and dashboard via systemd..."
   ssh -i "$OCI_KEY" "$OCI_HOST" "
-    pkill -f diamond_monitor; pkill -f diamond_dashboard; sleep 1
-    cd $OCI_DIR
-    nohup $PYTHON diamond_monitor.py > diamond_monitor.log 2>&1 &
-    nohup $PYTHON diamond_dashboard.py > diamond_dashboard.log 2>&1 &
+    sudo systemctl restart diamond-monitor
+    sudo systemctl restart diamond-dashboard
     sleep 3
+    echo '--- Monitor status ---'
+    systemctl is-active diamond-monitor
+    echo '--- Dashboard status ---'
+    systemctl is-active diamond-dashboard
     echo '--- Monitor log ---'
-    tail -5 diamond_monitor.log
-    echo '--- Processes ---'
-    ps aux | grep diamond | grep -v grep
+    journalctl -u diamond-monitor --no-pager -n 5
   "
 else
   echo "Files deployed. Run with --restart to also restart services."

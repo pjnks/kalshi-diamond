@@ -43,26 +43,32 @@ from diamond_config import (
 
 ROOT = Path(__file__).parent
 
-# ── Colour palette (consistent with HMM-Trader dashboards) ────────────────────
-BG       = "#0d0f14"
-PANEL    = "#141820"
-BORDER   = "#1e2330"
+# ── Colour palette (futuristic terminal aesthetic) ────────────────────────────
+BG       = "#080b16"
+PANEL    = "rgba(16, 22, 36, 0.75)"
+PANEL_SOLID = "#101624"  # For Plotly (can't use rgba)
+BORDER   = "rgba(0, 240, 255, 0.08)"
+BORDER_SOLID = "#0e1a2a"  # For Plotly gridlines
 TEXT     = "#e0e4f0"
 TEXT_DIM = "#6b7394"
 GREEN    = "#00e676"
 RED      = "#ff1744"
-YELLOW   = "#ffea00"
+YELLOW   = "#EAB308"
 BLUE     = "#448aff"
-PURPLE   = "#e040fb"
-ORANGE   = "#ff6d00"
-CYAN     = "#00e5ff"
+PURPLE   = "#8B5CF6"
+ORANGE   = "#F59E0B"
+CYAN     = "#00F0FF"
 
 LEVEL_COLORS = {
     "LOG": TEXT_DIM,
-    "NOTABLE": YELLOW,
+    "NOTABLE": PURPLE,
     "ALERT": ORANGE,
     "CRITICAL": RED,
 }
+
+# Font families
+FONT_BODY = "'Inter', 'Segoe UI', sans-serif"
+FONT_MONO = "'JetBrains Mono', 'Fira Code', monospace"
 
 DB_PATH = ROOT / "diamond_trades.db"
 EST = timezone(timedelta(hours=-5))
@@ -406,12 +412,12 @@ def _build_pnl_chart(pnl_df: pd.DataFrame) -> go.Figure:
         ))
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor=BG, plot_bgcolor=PANEL,
-        font=dict(family="monospace", color=TEXT, size=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="JetBrains Mono, monospace", color=TEXT, size=10),
         margin=dict(l=50, r=10, t=10, b=30),
         height=200,
-        xaxis=dict(gridcolor=BORDER),
-        yaxis=dict(gridcolor=BORDER, title=dict(text="Cumulative P&L (¢)", font=dict(size=9))),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title=dict(text="Cumulative P&L (¢)", font=dict(size=9))),
     )
     return fig
 
@@ -445,14 +451,15 @@ def _paper_trades_table(paper_df: pd.DataFrame) -> html.Div:
         columns=[{"name": col_names.get(c, c), "id": c} for c in cols],
         style_table={"overflowX": "auto"},
         style_header={
-            "backgroundColor": PANEL, "color": TEXT_DIM,
-            "fontWeight": "600", "fontSize": "0.7rem",
-            "textTransform": "uppercase", "border": f"1px solid {BORDER}",
+            "backgroundColor": PANEL_SOLID, "color": TEXT_DIM,
+            "fontWeight": "600", "fontSize": "0.7rem", "fontFamily": FONT_BODY,
+            "textTransform": "uppercase", "border": f"1px solid {BORDER_SOLID}",
+            "letterSpacing": "0.05em",
         },
         style_cell={
             "backgroundColor": BG, "color": TEXT,
-            "fontFamily": "monospace", "fontSize": "0.8rem",
-            "border": f"1px solid {BORDER}", "padding": "6px 10px", "textAlign": "left",
+            "fontFamily": FONT_MONO, "fontSize": "0.8rem",
+            "border": f"1px solid {BORDER_SOLID}", "padding": "6px 10px", "textAlign": "left",
         },
         style_data_conditional=[
             {"if": {"filter_query": '{status} = "settled" && {pnl} contains "+"'},
@@ -462,6 +469,94 @@ def _paper_trades_table(paper_df: pd.DataFrame) -> html.Div:
             {"if": {"filter_query": '{status} = "filled"'},
              "color": YELLOW},
             {"if": {"filter_query": '{status} = "unfilled"'},
+             "color": TEXT_DIM},
+        ],
+        page_size=10,
+        sort_action="native",
+        style_as_list_view=True,
+    )
+
+
+def _load_skipped_trades(limit: int = 200) -> pd.DataFrame:
+    """Load skipped trade history."""
+    conn = _get_conn()
+    if conn is None:
+        return pd.DataFrame()
+    try:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "skipped_trades" not in tables:
+            return pd.DataFrame()
+        return pd.read_sql_query(
+            "SELECT * FROM skipped_trades ORDER BY ts DESC LIMIT ?",
+            conn, params=(limit,))
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
+SKIP_REASON_COLORS = {
+    "conviction_block": "#8b5cf6",  # violet
+    "dedup": "#64748b",  # slate
+    "event_limit": "#f59e0b",  # amber
+    "category_limit": "#f59e0b",
+    "min_price": "#6b7280",  # gray
+    "burst_throttle": "#ef4444",  # red
+    "kill_switch": "#ef4444",
+    "max_positions": "#f59e0b",
+}
+
+
+def _skipped_trades_table(skipped_df: pd.DataFrame) -> html.Div:
+    """Build skipped trades table."""
+    if skipped_df.empty:
+        return html.Div(
+            "No skipped trades recorded yet",
+            style={"color": TEXT_DIM, "textAlign": "center", "padding": "20px"})
+
+    display = skipped_df.head(200).copy()
+    display["time"] = (
+        pd.to_datetime(display["ts"], unit="s", utc=True)
+        .dt.tz_convert("US/Eastern").dt.strftime("%m/%d %H:%M"))
+    display["market"] = display.apply(
+        lambda r: (str(r["title"]) if r.get("title") and str(r.get("title")) != "nan" else r["ticker"])[:40], axis=1)
+    display["price_fmt"] = display["price_cents"].apply(
+        lambda x: f"{int(x)}¢" if pd.notna(x) and x > 0 else "—")
+    display["score_fmt"] = display["anomaly_score"].apply(
+        lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+    display["reason_fmt"] = display["skip_reason"].apply(
+        lambda x: str(x).replace("_", " ").title())
+
+    cols = ["time", "market", "side", "price_fmt", "anomaly_level", "score_fmt", "reason_fmt", "detail"]
+    col_names = {"time": "Time", "market": "Market", "side": "Side", "price_fmt": "Price",
+                 "anomaly_level": "Level", "score_fmt": "Score", "reason_fmt": "Skip Reason", "detail": "Detail"}
+
+    return dash_table.DataTable(
+        data=display[cols].to_dict("records"),
+        columns=[{"name": col_names.get(c, c), "id": c} for c in cols],
+        style_table={"overflowX": "auto"},
+        style_header={
+            "backgroundColor": PANEL_SOLID, "color": TEXT_DIM,
+            "fontWeight": "600", "fontSize": "0.7rem", "fontFamily": FONT_BODY,
+            "textTransform": "uppercase", "border": f"1px solid {BORDER_SOLID}",
+            "letterSpacing": "0.05em",
+        },
+        style_cell={
+            "backgroundColor": BG, "color": TEXT,
+            "fontFamily": FONT_MONO, "fontSize": "0.8rem",
+            "border": f"1px solid {BORDER_SOLID}", "padding": "6px 10px", "textAlign": "left",
+        },
+        style_data_conditional=[
+            {"if": {"filter_query": '{reason_fmt} = "Conviction Block"'},
+             "color": "#8b5cf6"},
+            {"if": {"filter_query": '{reason_fmt} = "Kill Switch"'},
+             "color": RED, "fontWeight": "600"},
+            {"if": {"filter_query": '{reason_fmt} = "Burst Throttle"'},
+             "color": RED},
+            {"if": {"filter_query": '{reason_fmt} = "Event Limit"'},
+             "color": YELLOW},
+            {"if": {"filter_query": '{reason_fmt} = "Dedup"'},
              "color": TEXT_DIM},
         ],
         page_size=10,
@@ -489,10 +584,12 @@ def _build_volume_timeline(vol_df: pd.DataFrame, anom_df: pd.DataFrame) -> go.Fi
             showarrow=False, font=dict(size=16, color=TEXT_DIM),
         )
     else:
-        # Volume bars
+        # Volume bars with cyan-to-violet gradient
+        n_bars = len(vol_df)
+        bar_colors = [f"rgba({int(0 + (139-0)*i/max(n_bars-1,1))},{int(240 + (92-240)*i/max(n_bars-1,1))},{int(255 + (246-255)*i/max(n_bars-1,1))},0.75)" for i in range(n_bars)]
         fig.add_trace(go.Bar(
             x=vol_df["time"], y=vol_df["total_volume"],
-            marker_color=BLUE, opacity=0.7,
+            marker_color=bar_colors,
             name="Volume",
             hovertemplate="%{x}<br>Volume: %{y:,.0f}<extra></extra>",
         ), row=1, col=1)
@@ -519,17 +616,17 @@ def _build_volume_timeline(vol_df: pd.DataFrame, anom_df: pd.DataFrame) -> go.Fi
 
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor=BG, plot_bgcolor=PANEL,
-        font=dict(family="monospace", color=TEXT, size=11),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="JetBrains Mono, monospace", color=TEXT, size=11),
         margin=dict(l=50, r=10, t=60, b=10),
         height=400,
         barmode="stack",
         showlegend=True,
         legend=dict(orientation="h", y=1.22, x=0, font=dict(size=9)),
-        yaxis=dict(gridcolor=BORDER, title=None),
-        yaxis2=dict(gridcolor=BORDER, title=None),
-        xaxis=dict(gridcolor=BORDER),
-        xaxis2=dict(gridcolor=BORDER),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title=None),
+        yaxis2=dict(gridcolor="rgba(255,255,255,0.05)", title=None),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+        xaxis2=dict(gridcolor="rgba(255,255,255,0.05)"),
     )
     # Update subplot title colors
     for annotation in fig.layout.annotations:
@@ -560,8 +657,9 @@ def _build_feature_radar(anomaly_row: pd.Series | None) -> go.Figure:
             r=values,
             theta=display,
             fill="toself",
-            fillcolor=f"rgba({','.join(str(int(color.lstrip('#')[i:i+2], 16)) for i in (0,2,4))},0.15)",
-            line=dict(color=color, width=2),
+            fillcolor=f"rgba(0,240,255,0.10)",
+            line=dict(color=CYAN, width=2.5),
+            marker=dict(size=4, color=CYAN),
             name=f"{anomaly_row.get('ticker', '?')}",
         ))
     else:
@@ -573,18 +671,21 @@ def _build_feature_radar(anomaly_row: pd.Series | None) -> go.Figure:
 
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor=BG, plot_bgcolor=PANEL,
-        font=dict(family="monospace", color=TEXT, size=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, sans-serif", color=TEXT_DIM, size=10),
         margin=dict(l=40, r=40, t=20, b=30),
         height=320,
         polar=dict(
-            bgcolor=PANEL,
+            bgcolor="rgba(0,0,0,0)",
             radialaxis=dict(
                 visible=True, range=[0, 1],
-                gridcolor=BORDER, linecolor=BORDER,
-                tickfont=dict(size=8),
+                gridcolor="rgba(255,255,255,0.06)", linecolor="rgba(255,255,255,0.06)",
+                tickfont=dict(size=8, color=TEXT_DIM),
             ),
-            angularaxis=dict(gridcolor=BORDER, linecolor=BORDER),
+            angularaxis=dict(
+                gridcolor="rgba(255,255,255,0.06)",
+                linecolor="rgba(255,255,255,0.06)",
+            ),
         ),
         showlegend=False,
     )
@@ -605,26 +706,28 @@ def _build_market_volume_heatmap(markets_df: pd.DataFrame) -> go.Figure:
         # Use title if available, fall back to ticker
         display_tickers = []
         for _, row in markets_df.iterrows():
-            name = row.get("title") or row.get("ticker", "")
+            name = str(row.get("title") or row.get("ticker") or "")
             display_tickers.append(name[:45] + "..." if len(name) > 45 else name)
 
+        # Gradient colors from cyan to violet
+        n_bars = len(display_tickers)
+        bar_colors = [f"rgba({int(0 + (139-0)*i/max(n_bars-1,1))},{int(240 + (92-240)*i/max(n_bars-1,1))},{int(255 + (246-255)*i/max(n_bars-1,1))},0.8)" for i in range(n_bars)]
         fig.add_trace(go.Bar(
             y=display_tickers[::-1],
             x=markets_df["volume_1h"][::-1],
             orientation="h",
-            marker_color=BLUE,
-            opacity=0.8,
+            marker_color=bar_colors[::-1],
             hovertemplate="%{y}<br>Volume: %{x:,.0f}<extra></extra>",
         ))
 
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor=BG, plot_bgcolor=PANEL,
-        font=dict(family="monospace", color=TEXT, size=9),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, sans-serif", color=TEXT, size=9),
         margin=dict(l=180, r=10, t=10, b=10),
         height=280,
-        xaxis=dict(gridcolor=BORDER, title=None),
-        yaxis=dict(gridcolor=BORDER, title=None, tickfont=dict(size=8),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title=None),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title=None, tickfont=dict(size=8),
                    automargin=True),
     )
     return fig
@@ -634,19 +737,27 @@ def _build_market_volume_heatmap(markets_df: pd.DataFrame) -> go.Figure:
 
 
 def _metric_card(title: str, value: str, color: str = TEXT) -> dbc.Card:
+    # Build glow shadow matching the accent color
+    try:
+        r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+        glow = f"0 0 20px rgba({r},{g},{b},0.25)"
+    except (ValueError, IndexError):
+        glow = "none"
     return dbc.Card(
         dbc.CardBody([
             html.P(title, className="card-title",
                    style={"fontSize": "0.65rem", "color": TEXT_DIM,
-                          "marginBottom": "4px", "textTransform": "uppercase",
+                          "marginBottom": "6px", "textTransform": "uppercase",
                           "letterSpacing": "0.08em", "whiteSpace": "nowrap",
-                          "overflow": "hidden", "textOverflow": "ellipsis"}),
-            html.H4(value, style={"color": color, "fontFamily": "monospace",
+                          "overflow": "hidden", "textOverflow": "ellipsis",
+                          "fontFamily": FONT_BODY}),
+            html.H4(value, style={"color": color, "fontFamily": FONT_MONO,
                                    "fontWeight": "700", "marginBottom": "0",
-                                   "whiteSpace": "nowrap", "fontSize": "1.5rem"}),
-        ], style={"padding": "10px 12px"}),
-        style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-               "borderRadius": "8px"},
+                                   "whiteSpace": "nowrap", "fontSize": "2rem",
+                                   "textShadow": glow}),
+        ], style={"padding": "12px 14px"}),
+        className="glass-card",
+        style={"border": "none"},
     )
 
 
@@ -680,7 +791,7 @@ def _anomaly_table(anom_df: pd.DataFrame) -> html.Div:
     display_df["time"] = (
         pd.to_datetime(display_df["ts"], unit="s", utc=True)
         .dt.tz_convert("US/Eastern")
-        .dt.strftime("%H:%M:%S")
+        .dt.strftime("%H:%M:%S ET")
     )
 
     # Use title if available, fall back to ticker — keep full name for tooltips
@@ -709,7 +820,7 @@ def _anomaly_table(anom_df: pd.DataFrame) -> html.Div:
     display_df["score"] = display_df["score"].apply(lambda x: f"{x:.3f}")
 
     col_names = {
-        "time": "Time", "market": "Market", "alert_level": "Level",
+        "time": "Time (ET)", "market": "Market", "alert_level": "Level",
         "score": "Score", "trade_size_zscore": "Size",
         "volume_spike_ratio": "Spike", "order_book_imbalance": "Book",
         "taker_side_skew": "Skew", "price_impact": "Impact",
@@ -730,36 +841,37 @@ def _anomaly_table(anom_df: pd.DataFrame) -> html.Div:
         tooltip_duration=None,
         css=[{
             "selector": ".dash-table-tooltip",
-            "rule": f"background-color: {PANEL}; color: {TEXT}; font-family: monospace;"
-                    f" font-size: 0.8rem; border: 1px solid {BORDER}; border-radius: 6px;"
+            "rule": f"background-color: {PANEL_SOLID}; color: {TEXT}; font-family: {FONT_MONO};"
+                    f" font-size: 0.8rem; border: 1px solid rgba(0,240,255,0.15); border-radius: 10px;"
                     f" padding: 8px 12px; max-width: 500px; width: auto;"
-                    f" box-shadow: 0 4px 12px rgba(0,0,0,0.5);",
+                    f" box-shadow: 0 4px 16px rgba(0,0,0,0.6), 0 0 8px rgba(0,240,255,0.08);"
+                    f" backdrop-filter: blur(12px);",
         }],
         style_table={"overflowX": "auto"},
         style_header={
-            "backgroundColor": PANEL, "color": TEXT_DIM,
-            "fontWeight": "600", "fontSize": "0.7rem",
+            "backgroundColor": PANEL_SOLID, "color": TEXT_DIM,
+            "fontWeight": "600", "fontSize": "0.7rem", "fontFamily": FONT_BODY,
             "textTransform": "uppercase", "letterSpacing": "0.05em",
-            "border": f"1px solid {BORDER}",
+            "border": f"1px solid {BORDER_SOLID}",
         },
         style_cell={
             "backgroundColor": BG, "color": TEXT,
-            "fontFamily": "monospace", "fontSize": "0.8rem",
-            "border": f"1px solid {BORDER}",
+            "fontFamily": FONT_MONO, "fontSize": "0.8rem",
+            "border": f"1px solid {BORDER_SOLID}",
             "padding": "6px 10px", "textAlign": "left",
             "minWidth": "50px", "maxWidth": "250px",
         },
         style_data_conditional=[
             {"if": {"filter_query": '{alert_level} = "CRITICAL"'},
              "color": RED, "fontWeight": "700",
-             "backgroundColor": "rgba(255,23,68,0.12)",
+             "backgroundColor": "rgba(255,23,68,0.10)",
              "borderLeft": f"3px solid {RED}"},
             {"if": {"filter_query": '{alert_level} = "ALERT"'},
              "color": ORANGE, "fontWeight": "700",
-             "backgroundColor": "rgba(255,109,0,0.10)",
+             "backgroundColor": "rgba(245,158,11,0.08)",
              "borderLeft": f"3px solid {ORANGE}"},
             {"if": {"filter_query": '{alert_level} = "NOTABLE"'},
-             "color": "#8a8040", "fontWeight": "400"},
+             "color": PURPLE, "fontWeight": "400"},
             {"if": {"filter_query": '{alert_level} = "LOG"'},
              "color": TEXT_DIM, "fontWeight": "400"},
         ],
@@ -781,8 +893,9 @@ def _threshold_indicator() -> html.Div:
     for name, val, color in levels:
         items.append(html.Div([
             html.Span(f"{name}", style={"color": color, "fontWeight": "600",
-                                         "width": "70px", "display": "inline-block"}),
-            html.Span(f"≥ {val:.2f}", style={"color": TEXT_DIM}),
+                                         "width": "70px", "display": "inline-block",
+                                         "fontFamily": FONT_MONO}),
+            html.Span(f"≥ {val:.2f}", style={"color": TEXT_DIM, "fontFamily": FONT_MONO}),
         ], style={"fontSize": "0.75rem", "marginBottom": "4px"})
         )
     return html.Div(items, style={"padding": "6px 0"})
@@ -792,17 +905,86 @@ def _threshold_indicator() -> html.Div:
 
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.CYBORG],
+    external_stylesheets=[
+        dbc.themes.CYBORG,
+        "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap",
+    ],
     title="DIAMOND — Unusual Volume Tracker",
 )
 
+# Inject custom CSS for glassmorphism, hover effects, animated border
+app.index_string = '''<!DOCTYPE html>
+<html>
+<head>
+{%metas%}
+<title>{%title%}</title>
+{%favicon%}
+{%css%}
+<style>
+  body {
+    background: linear-gradient(135deg, #080b16 0%, #0d1117 50%, #0a0e1a 100%) !important;
+    font-family: 'Inter', 'Segoe UI', sans-serif !important;
+  }
+  .glass-card {
+    background: rgba(16, 22, 36, 0.75) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(0, 240, 255, 0.08);
+    border-radius: 14px;
+    transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .glass-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(0, 240, 255, 0.2);
+    box-shadow: 0 8px 24px rgba(0, 240, 255, 0.06);
+  }
+  .glass-panel {
+    background: rgba(16, 22, 36, 0.75) !important;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(0, 240, 255, 0.08);
+    border-radius: 14px;
+  }
+  @keyframes gradient-shift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+  .header-border {
+    height: 2px;
+    background: linear-gradient(90deg, #00F0FF, #8B5CF6, #00F0FF, #8B5CF6);
+    background-size: 300% 100%;
+    animation: gradient-shift 4s ease infinite;
+  }
+  .glow-text-cyan {
+    text-shadow: 0 0 20px rgba(0, 240, 255, 0.4), 0 0 40px rgba(0, 240, 255, 0.15);
+  }
+  .neon-red { box-shadow: inset 3px 0 0 #ff1744, 0 0 8px rgba(255, 23, 68, 0.15); }
+  .neon-amber { box-shadow: inset 3px 0 0 #F59E0B, 0 0 6px rgba(245, 158, 11, 0.10); }
+  /* Dash table overrides */
+  .dash-table-container .dash-spreadsheet-container {
+    border-radius: 10px !important;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+{%app_entry%}
+<footer>
+{%config%}
+{%scripts%}
+{%renderer%}
+</footer>
+</body>
+</html>'''
+
 app.layout = html.Div([
     dcc.Interval(id="refresh-interval", interval=30_000, n_intervals=0),
-    dcc.Store(id="level-filter-store", data="ALL"),  # "ALL" or list like ["ALERT","CRITICAL"]
+    dcc.Store(id="level-filter-store", data="ALL"),
     html.Div(id="header-container"),
     html.Div(id="body-container",
-             style={"padding": "20px", "backgroundColor": BG, "minHeight": "100vh"}),
-], style={"backgroundColor": BG, "fontFamily": "monospace"})
+             style={"padding": "20px", "minHeight": "100vh"}),
+], style={"fontFamily": FONT_BODY})
 
 
 @app.callback(
@@ -841,24 +1023,29 @@ def update_dashboard(_n, current_filter):
 
     # ── Header ─────────────────────────────────────────────────────────────
     header = html.Div([
+        html.Div(className="header-border"),
         html.Div([
-            html.H3("DIAMOND", style={
-                "color": CYAN, "fontWeight": "800", "marginBottom": "0",
-                "letterSpacing": "0.15em",
-            }),
-            html.P("Kalshi Unusual Volume Tracker", style={
-                "color": TEXT_DIM, "fontSize": "0.85rem", "marginTop": "2px",
-            }),
-        ], style={"flex": "1"}),
-        html.Div([
-            html.Span(f"Last refresh: {now_str}", style={
-                "color": TEXT_DIM, "fontSize": "0.75rem",
-            }),
-        ], style={"textAlign": "right"}),
-    ], style={
-        "display": "flex", "justifyContent": "space-between",
-        "alignItems": "center", "padding": "16px 20px",
-        "backgroundColor": PANEL, "borderBottom": f"1px solid {BORDER}",
+            html.Div([
+                html.H3("DIAMOND", className="glow-text-cyan", style={
+                    "color": CYAN, "fontWeight": "800", "marginBottom": "0",
+                    "letterSpacing": "0.15em", "fontFamily": FONT_MONO,
+                }),
+                html.P("Kalshi Unusual Volume Tracker", style={
+                    "color": TEXT_DIM, "fontSize": "0.85rem", "marginTop": "2px",
+                    "fontFamily": FONT_BODY,
+                }),
+            ], style={"flex": "1"}),
+            html.Div([
+                html.Span(f"Last refresh: {now_str}", style={
+                    "color": TEXT_DIM, "fontSize": "0.75rem", "fontFamily": FONT_MONO,
+                }),
+            ], style={"textAlign": "right"}),
+        ], style={
+            "display": "flex", "justifyContent": "space-between",
+            "alignItems": "center", "padding": "16px 20px",
+        }),
+    ], className="glass-panel", style={
+        "borderRadius": "0", "borderTop": "none",
     })
 
     # ── Metric Cards ───────────────────────────────────────────────────────
@@ -897,8 +1084,7 @@ def update_dashboard(_n, current_filter):
         dbc.Col([
             html.Div(
                 dcc.Graph(figure=vol_chart, config={"displayModeBar": False}),
-                style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-                       "borderRadius": "8px", "padding": "8px"},
+                className="glass-panel", style={"padding": "8px"},
             ),
         ], width=8),
         dbc.Col([
@@ -909,8 +1095,7 @@ def update_dashboard(_n, current_filter):
                     "padding": "4px 8px",
                 }),
                 dcc.Graph(figure=radar_chart, config={"displayModeBar": False}),
-            ], style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-                      "borderRadius": "8px"}),
+            ], className="glass-panel"),
         ], width=4),
     ], className="g-2 mb-3")
 
@@ -932,10 +1117,10 @@ def update_dashboard(_n, current_filter):
         weight_items.append(html.Div([
             html.Div([
                 html.Span(short, style={"color": TEXT, "fontSize": "0.75rem", "width": "90px",
-                                         "display": "inline-block"}),
+                                         "display": "inline-block", "fontFamily": FONT_BODY}),
                 html.Span(f"{pct}%", style={"color": TEXT_DIM, "fontSize": "0.75rem",
                                              "width": "30px", "display": "inline-block",
-                                             "textAlign": "right"}),
+                                             "textAlign": "right", "fontFamily": FONT_MONO}),
             ], style={"display": "flex", "justifyContent": "space-between",
                       "marginBottom": "2px"}),
             html.Div(
@@ -952,12 +1137,11 @@ def update_dashboard(_n, current_filter):
             html.Div([
                 html.P("TOP MARKETS (1H VOLUME)", style={
                     "fontSize": "0.7rem", "color": TEXT_DIM, "marginBottom": "4px",
-                    "textTransform": "uppercase", "letterSpacing": "0.08em",
+                    "textTransform": "uppercase", "letterSpacing": "0.08em", "fontFamily": FONT_BODY,
                     "padding": "8px 8px 0",
                 }),
                 dcc.Graph(figure=market_chart, config={"displayModeBar": False}),
-            ], style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-                      "borderRadius": "8px"}),
+            ], className="glass-panel"),
         ], width=8),
         dbc.Col([
             html.Div([
@@ -972,8 +1156,7 @@ def update_dashboard(_n, current_filter):
                     "textTransform": "uppercase", "letterSpacing": "0.08em",
                 }),
                 _threshold_indicator(),
-            ], style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-                      "borderRadius": "8px", "padding": "12px"}),
+            ], className="glass-panel", style={"padding": "12px"}),
         ], width=4),
     ], className="g-2 mb-3")
 
@@ -987,13 +1170,22 @@ def update_dashboard(_n, current_filter):
         active_levels = {"LOG", "NOTABLE", "ALERT", "CRITICAL"}
 
     def _filter_btn(label, value, color, is_active=False):
-        bg = f"rgba({','.join(str(int(color.lstrip('#')[i:i+2], 16)) for i in (0,2,4))},{'0.25' if is_active else '0.08'})"
+        try:
+            r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+            bg = f"rgba({r},{g},{b},{'0.20' if is_active else '0.06'})"
+            shadow = f"0 0 10px rgba({r},{g},{b},0.25)" if is_active else "none"
+        except (ValueError, IndexError):
+            bg = "rgba(100,100,100,0.1)"
+            shadow = "none"
         return html.Button(label, id={"type": "level-filter", "value": value}, n_clicks=0,
             style={
-                "backgroundColor": bg, "color": color, "border": f"1px solid {color if is_active else BORDER}",
-                "borderRadius": "4px", "padding": "4px 12px", "marginRight": "6px",
-                "fontSize": "0.7rem", "fontWeight": "600", "fontFamily": "monospace",
+                "backgroundColor": bg, "color": color,
+                "border": f"1px solid {'rgba(' + str(r) + ',' + str(g) + ',' + str(b) + ',0.5)' if is_active else BORDER_SOLID}",
+                "borderRadius": "8px", "padding": "5px 14px", "marginRight": "6px",
+                "fontSize": "0.7rem", "fontWeight": "600", "fontFamily": FONT_MONO,
                 "cursor": "pointer", "textTransform": "uppercase",
+                "boxShadow": shadow, "backdropFilter": "blur(8px)",
+                "transition": "all 0.2s ease",
             })
 
     filter_bar = html.Div([
@@ -1016,8 +1208,7 @@ def update_dashboard(_n, current_filter):
         ]),
         filter_bar,
         html.Div(id="anomaly-table-container", children=_anomaly_table(anom_df)),
-    ], style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-              "borderRadius": "8px", "padding": "12px"})
+    ], className="glass-panel", style={"padding": "12px"})
 
     # ── Portfolio / Paper Trading Section (ALWAYS visible) ────────────────
     paper_stats = _load_paper_stats()
@@ -1090,15 +1281,28 @@ def update_dashboard(_n, current_filter):
         pnl_chart = _build_pnl_chart(pnl_timeline)
         paper_trades_df = _load_paper_trades(limit=100)
 
+        skipped_df = _load_skipped_trades(limit=200)
+        skip_count = len(skipped_df)
+
         paper_details = html.Div([
             html.Div([
                 dcc.Graph(figure=pnl_chart, config={"displayModeBar": False}),
-            ], style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-                      "borderRadius": "8px", "padding": "8px", "marginBottom": "12px"}),
+            ], className="glass-panel", style={"padding": "8px", "marginBottom": "12px"}),
             html.Div([
                 _paper_trades_table(paper_trades_df),
-            ], style={"backgroundColor": PANEL, "border": f"1px solid {BORDER}",
-                      "borderRadius": "8px", "padding": "12px"}),
+            ], className="glass-panel", style={"padding": "12px", "marginBottom": "12px"}),
+            html.Div([
+                html.Div([
+                    html.P("SKIPPED TRADES", style={
+                        "fontSize": "0.7rem", "color": "#8b5cf6", "marginBottom": "0",
+                        "textTransform": "uppercase", "letterSpacing": "0.08em",
+                    }),
+                    html.P(f"{skip_count} signals filtered out by risk gates", style={
+                        "fontSize": "0.65rem", "color": TEXT_DIM, "marginBottom": "8px",
+                    }),
+                ]),
+                _skipped_trades_table(skipped_df),
+            ], className="glass-panel", style={"padding": "12px"}),
         ])
 
     daily_pnl = paper_stats.get("total_daily_pnl_cents", 0) if paper_stats else 0

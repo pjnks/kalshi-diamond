@@ -144,7 +144,7 @@ class KalshiRESTClient:
             except (aiohttp.ClientConnectorError, aiohttp.ClientOSError,
                     aiohttp.ServerDisconnectedError, OSError) as e:
                 wait = min(5 + 2 ** attempt, 30)
-                log.warning(f"Connection error: {e}. Recycling session and retrying in {wait}s... "
+                log.warning(f"Connection error ({type(e).__name__}): {e or 'empty'}. Recycling session and retrying in {wait}s... "
                             f"(attempt {attempt+1}/{max_retries+1})")
                 await self._force_new_session()
                 await asyncio.sleep(wait)
@@ -239,6 +239,11 @@ class KalshiRESTClient:
     ) -> dict:
         """Place an order on Kalshi.
 
+        Uses the fixed-point dollar API (yes_price_dollars, count_fp) which
+        supports all market types including deci-cent parlays. The integer
+        yes_price/no_price parameters are converted to dollar strings
+        internally (e.g. 45 → "0.45").
+
         Args:
             ticker: Market ticker.
             side: "yes" or "no".
@@ -256,14 +261,16 @@ class KalshiRESTClient:
             "ticker": ticker,
             "side": side,
             "action": action,
-            "count": count,
+            "count_fp": f"{count}.00",
             "type": "limit",
             "time_in_force": time_in_force,
         }
+        # Use *_dollars fields (string format) — works for all market types
+        # including deci-cent parlays where integer yes_price fails
         if yes_price is not None:
-            body["yes_price"] = yes_price
+            body["yes_price_dollars"] = f"{yes_price / 100:.4f}"
         if no_price is not None:
-            body["no_price"] = no_price
+            body["no_price_dollars"] = f"{no_price / 100:.4f}"
         if client_order_id:
             body["client_order_id"] = client_order_id
 
@@ -332,6 +339,8 @@ class KalshiWSClient:
             channels = ["trade"]
 
         self._running = True
+        self._ws_error_count = 0
+        self._ws_error_alerted = False
 
         while self._running:
             try:
@@ -347,17 +356,36 @@ class KalshiWSClient:
                 ) as ws:
                     self._ws = ws
                     log.info("WebSocket connected to Kalshi")
+                    self._ws_error_count = 0  # Reset on successful stable connection
+                    self._ws_error_alerted = False
 
                     if tickers:
                         await self.subscribe(channels, tickers)
 
                     await self._listen()
 
+            except asyncio.TimeoutError:
+                log.warning("WebSocket stalled (receive timeout). Reconnecting in 5s...")
+                await asyncio.sleep(5)
             except websockets.ConnectionClosed as e:
                 log.warning(f"WebSocket closed: {e}. Reconnecting in 5s...")
                 await asyncio.sleep(5)
             except Exception as e:
-                log.error(f"WebSocket error: {e}. Reconnecting in 10s...")
+                import traceback
+                self._ws_error_count += 1
+                log.error(f"WebSocket error ({self._ws_error_count}x): {e}. Reconnecting in 10s...\n{traceback.format_exc()}")
+                # Alert on crash loop: 10 consecutive errors = something is fundamentally broken
+                if self._ws_error_count >= 10 and not self._ws_error_alerted:
+                    self._ws_error_alerted = True
+                    try:
+                        from src.diamond_alerts import _pushover
+                        _pushover(
+                            "DIAMOND CRASH LOOP",
+                            f"WebSocket has crashed {self._ws_error_count}x in a row: {e}. Trading may be offline!",
+                            priority=1,
+                        )
+                    except Exception:
+                        pass  # Don't let alert failure block reconnection
                 await asyncio.sleep(10)
 
     async def subscribe(self, channels: list[str], tickers: list[str]):
@@ -401,8 +429,21 @@ class KalshiWSClient:
             log.info("WebSocket disconnected")
 
     async def _listen(self):
-        """Listen for incoming messages and dispatch to handlers."""
-        async for raw in self._ws:
+        """Listen for incoming messages and dispatch to handlers.
+
+        Uses a 5-minute receive timeout to detect stalled connections.
+        If the WebSocket goes silent (no messages, including pings/subscription
+        confirmations) for 5 minutes, raises TimeoutError so the reconnect
+        loop in connect() kicks in.
+        """
+        WS_RECEIVE_TIMEOUT = 300  # 5 minutes — Kalshi sends trades frequently; silence means stall
+        while True:
+            try:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=WS_RECEIVE_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning(f"WebSocket receive timeout ({WS_RECEIVE_TIMEOUT}s with no messages) — forcing reconnect")
+                raise  # Bubbles up to connect() which will reconnect
+
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:

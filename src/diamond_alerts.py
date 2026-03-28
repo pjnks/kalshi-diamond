@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import platform
 import subprocess
 import time
 import urllib.parse
 import urllib.request
+
+_IS_MACOS = platform.system() == "Darwin"
 
 from diamond_config import (
     ALERT_COOLDOWN_SEC,
@@ -41,7 +44,9 @@ _LEVEL_SEVERITY = {"NOTABLE": 1, "ALERT": 2, "CRITICAL": 3}
 
 
 def _macos_notify(title: str, message: str, sound: str = "default") -> bool:
-    """Send macOS native notification via osascript."""
+    """Send macOS native notification via osascript. No-op on Linux."""
+    if not _IS_MACOS:
+        return False
     try:
         # Escape quotes for AppleScript
         title_esc = title.replace('"', '\\"')
@@ -117,6 +122,16 @@ def _check_cooldown(ticker: str, alert_level: str) -> bool:
 def _record_alert(ticker: str, alert_level: str):
     """Record that we just sent an alert for this ticker."""
     _last_alert[ticker] = {"ts": time.time(), "level": alert_level}
+    # Prune stale entries older than 2x ALERT_COOLDOWN_SEC to bound memory
+    _prune_stale_alerts()
+
+
+def _prune_stale_alerts():
+    """Remove entries from _last_alert older than 2x ALERT_COOLDOWN_SEC."""
+    cutoff = time.time() - (2 * ALERT_COOLDOWN_SEC)
+    stale = [t for t, info in _last_alert.items() if info["ts"] < cutoff]
+    for t in stale:
+        del _last_alert[t]
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -154,7 +169,7 @@ def dispatch_alert(
     # Build concise message
     title = f"{title_prefix}: {ticker}"
     top_features = sorted(
-        [(k, v) for k, v in features.items() if k not in ("composite", "alert_level")],
+        [(k, float(v)) for k, v in features.items() if k not in ("composite", "alert_level", "score_source", "ml_edge") and isinstance(v, (int, float))],
         key=lambda x: x[1],
         reverse=True,
     )[:3]

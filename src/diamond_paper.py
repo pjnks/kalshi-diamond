@@ -18,6 +18,8 @@ import uuid
 
 from diamond_config import (
     CONVICTION_ENABLED,
+    PAPER_CANCEL_SEC_ALERT,
+    PAPER_CANCEL_SEC_CRITICAL,
     PAPER_CONTRACTS_PER_TRADE,
     PAPER_MAX_PER_CATEGORY,
     PAPER_MAX_PER_EVENT,
@@ -65,7 +67,7 @@ class PaperTradingEngine:
         level: str,
         features: dict,
         title: str,
-        category: str = "",
+        category: str | None = None,
     ):
         """Called from diamond_monitor when an anomaly fires.
 
@@ -85,6 +87,8 @@ class PaperTradingEngine:
             return
         if price_int <= PAPER_MIN_PRICE_CENTS:
             log.debug(f"[PAPER] Skipping {ticker}: price {price_int}¢ ≤ min {PAPER_MIN_PRICE_CENTS}¢")
+            self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                             "min_price", f"price {price_int}¢ ≤ {PAPER_MIN_PRICE_CENTS}¢")
             return
 
         async with self._lock:
@@ -94,6 +98,8 @@ class PaperTradingEngine:
                 return
             if self._store.has_open_position(ticker):
                 log.debug(f"[PAPER] Skipping {ticker}: already have open position")
+                self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                 "dedup", "already have open position")
                 return
 
             # Event-level conviction check: block or flip opposing signals
@@ -104,6 +110,9 @@ class PaperTradingEngine:
                         f"[CONVICTION] BLOCK {ticker} — {decision.old_ticker} has stronger "
                         f"conviction ({decision.old_conviction:.2f} vs {decision.new_conviction:.2f})"
                     )
+                    self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                     "conviction_block",
+                                                     f"{decision.old_ticker} stronger ({decision.old_conviction:.1f} vs {decision.new_conviction:.1f})")
                     return
                 elif decision.action == "flip":
                     # Check if we actually have a position to exit
@@ -153,6 +162,8 @@ class PaperTradingEngine:
             stats = self._store.get_paper_stats()
             if stats["open_positions"] >= PAPER_MAX_POSITIONS:
                 log.info(f"[PAPER] Skipping {ticker}: max positions reached ({PAPER_MAX_POSITIONS})")
+                self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                 "max_positions", f"{stats['open_positions']}/{PAPER_MAX_POSITIONS}")
                 return
 
             # Category exposure limit
@@ -161,6 +172,8 @@ class PaperTradingEngine:
                 if cat_count >= PAPER_MAX_PER_CATEGORY:
                     log.info(f"[PAPER] Skipping {ticker}: category '{category}' at limit "
                              f"({cat_count}/{PAPER_MAX_PER_CATEGORY})")
+                    self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                     "category_limit", f"{category} ({cat_count}/{PAPER_MAX_PER_CATEGORY})")
                     return
 
             # Event exposure limit
@@ -169,6 +182,8 @@ class PaperTradingEngine:
             if len(event_positions) >= PAPER_MAX_PER_EVENT:
                 log.info(f"[PAPER] Skipping {ticker}: event at limit "
                          f"({len(event_positions)}/{PAPER_MAX_PER_EVENT})")
+                self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                 "event_limit", f"{event_id} ({len(event_positions)}/{PAPER_MAX_PER_EVENT})")
                 return
 
             # Burst throttle
@@ -176,6 +191,8 @@ class PaperTradingEngine:
             if recent_trade_count >= PAPER_MAX_TRADES_PER_5MIN:
                 log.info(f"[PAPER] Burst throttle: {recent_trade_count} trades in last 5 min "
                          f"(limit {PAPER_MAX_TRADES_PER_5MIN})")
+                self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                 "burst_throttle", f"{recent_trade_count}/{PAPER_MAX_TRADES_PER_5MIN} in 5min")
                 return
 
             # Kill switch: total daily P&L (realized + unrealized) drops below -$20
@@ -196,6 +213,8 @@ class PaperTradingEngine:
                         features={"reason": "daily_loss_cap"},
                         market_title=f"Paper Trading Kill Switch — Daily P&L {new_daily_pnl:+d}¢ would exceed -${PAPER_MAX_UNREALIZED_CENTS/100:.2f} limit",
                     )
+                self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                 "kill_switch", f"P&L {new_daily_pnl:+d}¢ < -${PAPER_MAX_UNREALIZED_CENTS/100:.0f}")
                 return
 
             # Mark as pending to prevent race conditions
@@ -224,7 +243,7 @@ class PaperTradingEngine:
         level: str,
         features: dict,
         title: str,
-        category: str = "",
+        category: str | None = None,
     ):
         """Place a limit order with order-book-aware pricing."""
         client_order_id = f"diamond_{ticker}_{int(time.time())}"
@@ -349,9 +368,13 @@ class PaperTradingEngine:
             order_id = order.get("order_id", "")
             status = order.get("status", "")
 
-            # Parse fill info — Kalshi returns fill details in the order response
-            # Use float() first to handle string formats like "0.00" (int("0.00") crashes)
-            raw_fill = order.get("count_filled", order.get("count_filled_fp", 0) or 0)
+            # Parse fill info — Kalshi API uses _fp suffixed fields (string format)
+            # Check new field names first, fall back to deprecated names
+            raw_fill = (order.get("fill_count_fp")
+                        or order.get("count_filled_fp")
+                        or order.get("count_filled")
+                        or order.get("fill_count")
+                        or "0")
             fill_count = int(float(raw_fill))
             # Kalshi may return average fill price in various fields
             fill_price = adjusted_price  # Use adjusted price as default
@@ -369,8 +392,14 @@ class PaperTradingEngine:
             else:
                 # Order queued but not yet filled — save order_id for tracking
                 self._store.update_paper_fill(row_id, order_id, adjusted_price, 0, "pending")
+
+                # Schedule aggressive cancel: alpha decays in seconds, not hours.
+                # Leaving a resting limit order ensures adverse selection — you only
+                # get filled when the market moves against you.
+                cancel_sec = PAPER_CANCEL_SEC_CRITICAL if level == "CRITICAL" else PAPER_CANCEL_SEC_ALERT
                 log.info(f"[PAPER] ⏳ Pending: {ticker} {side} @ {adjusted_price}¢ "
-                         f"(GTC order {order_id})")
+                         f"(GTC order {order_id}, auto-cancel in {cancel_sec}s)")
+                asyncio.ensure_future(self._cancel_after(order_id, row_id, ticker, cancel_sec))
 
         except Exception as e:
             log.error(f"[PAPER] Order failed for {ticker}: {e}", exc_info=True)
@@ -387,6 +416,48 @@ class PaperTradingEngine:
                     features={"reason": "order_failed", "error": str(e)[:200]},
                     market_title=f"ORDER FAILED: {ticker} {side} @ {price_cents}¢ — {e}",
                 )
+
+    async def _cancel_after(self, order_id: str, row_id: int, ticker: str, delay_sec: int):
+        """Cancel a GTC order after delay_sec if still unfilled.
+
+        Prediction market alpha decays in seconds. A resting limit order past
+        the signal's half-life is adverse selection bait — you only get filled
+        when the market moves against you.
+        """
+        await asyncio.sleep(delay_sec)
+        try:
+            order = await self._rest.get_order(order_id)
+            raw_fill = (order.get("fill_count_fp")
+                        or order.get("count_filled_fp")
+                        or order.get("count_filled")
+                        or order.get("fill_count")
+                        or "0")
+            fill_count = int(float(raw_fill))
+
+            if fill_count > 0:
+                # Filled during the wait — record the fill
+                self._store.update_paper_fill(row_id, order_id, None, fill_count, "filled")
+                log.info(f"[PAPER] Fill confirmed during cancel window: {ticker} {fill_count}x")
+                if PAPER_NOTIFY_TRADES and self._alerts:
+                    self._alerts.notify_trade_placed(
+                        ticker=ticker, side="", price=0, title=ticker,
+                    )
+                return
+
+            order_status = order.get("status", "")
+            if order_status in ("canceled", "expired", "executed"):
+                # Already resolved
+                if order_status != "executed" or fill_count == 0:
+                    self._store.update_paper_fill(row_id, order_id, 0, 0, "unfilled")
+                return
+
+            # Still resting — cancel it
+            await self._rest.cancel_order(order_id)
+            self._store.update_paper_fill(row_id, order_id, 0, 0, "unfilled")
+            log.info(f"[PAPER] Auto-cancelled stale order: {ticker} "
+                     f"(unfilled after {delay_sec}s — adverse selection prevention)")
+        except Exception as e:
+            log.debug(f"[PAPER] Auto-cancel error for {ticker}/{order_id}: {e}")
 
     async def _exit_position(
         self,
@@ -576,7 +647,13 @@ class PaperTradingEngine:
             try:
                 order = await self._rest.get_order(order_id)
                 order_status = order.get("status", "")
-                fill_count = int(float(order.get("count_filled", 0) or 0))
+                # Kalshi API uses _fp suffixed fields (string format like "1.00")
+                raw_fill = (order.get("fill_count_fp")
+                            or order.get("count_filled_fp")
+                            or order.get("count_filled")
+                            or order.get("fill_count")
+                            or "0")
+                fill_count = int(float(raw_fill))
 
                 if fill_count > 0:
                     # Order filled (or partially filled)
@@ -610,7 +687,7 @@ class PaperTradingEngine:
                         except Exception:
                             pass  # May already be cancelled
                         self._store.update_paper_fill(trade["id"], order_id, 0, 0, "unfilled")
-                        log.info(f"[PAPER] Cancelled stale GTC order: {trade['ticker']} "
+                        log.info(f"[PAPER] Cancelled stale GTC order (fallback): {trade['ticker']} "
                                  f"(age={int(age_sec)}s > {PAPER_STALE_ORDER_SEC}s)")
                         continue
 

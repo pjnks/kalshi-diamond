@@ -154,6 +154,14 @@ class DiamondStore:
             self._conn.execute("ALTER TABLE paper_trades ADD COLUMN event_id TEXT")
             self._conn.commit()
             log.info("Migration: added 'event_id' column to paper_trades table")
+        if "ml_edge" not in pt_cols:
+            self._conn.execute("ALTER TABLE paper_trades ADD COLUMN ml_edge REAL")
+            self._conn.commit()
+            log.info("Migration: added 'ml_edge' column to paper_trades table")
+        if "realized_edge" not in pt_cols:
+            self._conn.execute("ALTER TABLE paper_trades ADD COLUMN realized_edge REAL")
+            self._conn.commit()
+            log.info("Migration: added 'realized_edge' column to paper_trades table")
 
         # Create conviction_signals table for persisting conviction state
         self._conn.executescript("""
@@ -165,6 +173,24 @@ class DiamondStore:
                 ts          REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_conviction_event_ts ON conviction_signals(event_id, ts);
+        """)
+        self._conn.commit()
+
+        # Create skipped_trades table for dashboard visibility
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS skipped_trades (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker          TEXT NOT NULL,
+                title           TEXT,
+                side            TEXT,
+                price_cents     INTEGER,
+                anomaly_score   REAL,
+                anomaly_level   TEXT,
+                skip_reason     TEXT NOT NULL,
+                detail          TEXT,
+                ts              REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_skipped_ts ON skipped_trades(ts);
         """)
         self._conn.commit()
 
@@ -210,7 +236,7 @@ class DiamondStore:
     def get_trades_since(self, ticker: str, since_ts: float) -> list[dict]:
         """Get trades for a ticker since a timestamp."""
         rows = self._conn.execute(
-            "SELECT * FROM trades WHERE ticker = ? AND ts >= ? ORDER BY ts",
+            "SELECT * FROM trades WHERE ticker = ? AND ts >= ? ORDER BY ts LIMIT 10000",
             (ticker, since_ts),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -254,7 +280,8 @@ class DiamondStore:
                FROM trades
                WHERE ticker = ? AND ts >= ?
                GROUP BY hour_ts
-               ORDER BY hour_ts""",
+               ORDER BY hour_ts
+               LIMIT 10000""",
             (ticker, cutoff),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -352,7 +379,7 @@ class DiamondStore:
         """Get anomalies for a specific ticker."""
         cutoff = time.time() - hours_back * 3600
         rows = self._conn.execute(
-            "SELECT * FROM anomalies WHERE ticker = ? AND ts >= ? ORDER BY ts DESC",
+            "SELECT * FROM anomalies WHERE ticker = ? AND ts >= ? ORDER BY ts DESC LIMIT 10000",
             (ticker, cutoff),
         ).fetchall()
         result = []
@@ -430,7 +457,7 @@ class DiamondStore:
         """Load recent conviction signals for state restoration on startup."""
         cutoff = time.time() - max_age_sec
         rows = self._conn.execute(
-            "SELECT event_id, ticker, score, ts FROM conviction_signals WHERE ts >= ? ORDER BY ts",
+            "SELECT event_id, ticker, score, ts FROM conviction_signals WHERE ts >= ? ORDER BY ts LIMIT 10000",
             (cutoff,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -464,6 +491,33 @@ class DiamondStore:
 
     # ── Paper Trades ─────────────────────────────────────────────────
 
+    def insert_skipped_trade(
+        self,
+        ticker: str,
+        title: str,
+        side: str | None,
+        price_cents: int | None,
+        anomaly_score: float,
+        anomaly_level: str,
+        skip_reason: str,
+        detail: str = "",
+    ):
+        """Record a skipped trade for dashboard visibility."""
+        self._conn.execute(
+            """INSERT INTO skipped_trades
+               (ticker, title, side, price_cents, anomaly_score, anomaly_level, skip_reason, detail, ts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (ticker, title, side, price_cents, anomaly_score, anomaly_level, skip_reason, detail, time.time()),
+        )
+        self._conn.commit()
+
+    def get_recent_skipped_trades(self, limit: int = 200) -> list[dict]:
+        """Get recent skipped trades for dashboard display."""
+        rows = self._conn.execute(
+            "SELECT * FROM skipped_trades ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def insert_paper_trade(
         self,
         ticker: str,
@@ -481,13 +535,16 @@ class DiamondStore:
         category: str | None = None,
     ) -> int:
         """Insert a new paper trade record. Returns the row ID."""
+        ml_edge = features.get("ml_edge")
         cur = self._conn.execute(
             """INSERT INTO paper_trades
                (order_id, client_order_id, ticker, title, side, action, count,
-                entry_price, anomaly_score, anomaly_level, features_json, opened_at, status, event_id, category)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                entry_price, anomaly_score, anomaly_level, features_json, opened_at, status,
+                event_id, category, ml_edge)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
             (order_id, client_order_id, ticker, title, side, action, count,
-             entry_price, anomaly_score, anomaly_level, json.dumps(features), time.time(), event_id, category),
+             entry_price, anomaly_score, anomaly_level, json.dumps(features), time.time(),
+             event_id, category, ml_edge),
         )
         self._conn.commit()
         return cur.lastrowid
@@ -503,26 +560,47 @@ class DiamondStore:
         self._conn.commit()
 
     def update_paper_settlement(self, row_id: int, settlement: str, pnl_cents: float):
-        """Update a paper trade when its market settles."""
+        """Update a paper trade when its market settles.
+
+        Also computes realized_edge = settlement_value - fill_price (in cents).
+        This tracks adverse selection: if realized_edge is systematically worse
+        than predicted edge (ml_edge), we're paying adverse selection.
+        """
+        # Compute realized edge: settlement value - fill price
+        # settlement_value = 100 if we bet YES and outcome is YES (or NO and outcome is NO)
+        # settlement_value = 0 otherwise
+        row = self._conn.execute(
+            "SELECT side, fill_price FROM paper_trades WHERE id = ?", (row_id,)
+        ).fetchone()
+        realized_edge = None
+        if row:
+            side = row["side"]
+            fill = row["fill_price"] or 0
+            won = (side == "yes" and settlement == "yes") or \
+                  (side == "no" and settlement == "no")
+            settlement_value = 100 if won else 0
+            realized_edge = (settlement_value - fill) / 100.0  # Normalize to 0-1 scale
+
         self._conn.execute(
             """UPDATE paper_trades
-               SET settlement = ?, pnl_cents = ?, status = 'settled', settled_at = ?
+               SET settlement = ?, pnl_cents = ?, status = 'settled', settled_at = ?,
+                   realized_edge = ?
                WHERE id = ?""",
-            (settlement, pnl_cents, time.time(), row_id),
+            (settlement, pnl_cents, time.time(), realized_edge, row_id),
         )
         self._conn.commit()
 
     def get_open_paper_trades(self) -> list[dict]:
         """Get all paper trades with status 'filled' (waiting for settlement)."""
         rows = self._conn.execute(
-            "SELECT * FROM paper_trades WHERE status = 'filled' ORDER BY opened_at DESC"
+            "SELECT * FROM paper_trades WHERE status = 'filled' ORDER BY opened_at DESC LIMIT 10000"
         ).fetchall()
         return [dict(r) for r in rows]
 
     def get_pending_paper_trades(self) -> list[dict]:
         """Get all paper trades with status 'pending' (order placed, fill unknown)."""
         rows = self._conn.execute(
-            "SELECT * FROM paper_trades WHERE status = 'pending' ORDER BY opened_at DESC"
+            "SELECT * FROM paper_trades WHERE status = 'pending' ORDER BY opened_at DESC LIMIT 10000"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -566,7 +644,7 @@ class DiamondStore:
         cutoff = time.time() - 86400
         rows = self._conn.execute(
             "SELECT * FROM paper_trades WHERE event_id = ? AND opened_at >= ? "
-            "ORDER BY opened_at DESC",
+            "ORDER BY opened_at DESC LIMIT 10000",
             (event_id, cutoff),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -623,7 +701,7 @@ class DiamondStore:
         unrealized_pnl = 0
         open_trades = self._conn.execute(
             "SELECT pt.id, pt.ticker, pt.side, pt.entry_price, pt.fill_count "
-            "FROM paper_trades pt WHERE pt.status = 'filled' AND pt.fill_count > 0"
+            "FROM paper_trades pt WHERE pt.status = 'filled' AND pt.fill_count > 0 LIMIT 10000"
         ).fetchall()
 
         for trade in open_trades:
@@ -641,9 +719,10 @@ class DiamondStore:
             if last_trade:
                 # Use the appropriate side price
                 current_price = last_trade["yes_price"] if side == "yes" else last_trade["no_price"]
-                # P&L = (current - entry) * count (if yes: profit if price goes up)
-                pnl_per_contract = (current_price - entry_price)
-                unrealized_pnl += pnl_per_contract * fill_count
+                if current_price is not None and entry_price is not None:
+                    # P&L = (current - entry) * count (if yes: profit if price goes up)
+                    pnl_per_contract = (float(current_price) - float(entry_price))
+                    unrealized_pnl += pnl_per_contract * fill_count
 
         # Total daily P&L = realized + unrealized
         total_daily_pnl = total_pnl + unrealized_pnl

@@ -47,6 +47,7 @@ from src.diamond_features import (
     cross_market_correlation,
 )
 from src.diamond_store import DiamondStore
+from src.diamond_analytics import calculate_deflated_sharpe
 from src.kalshi_client import KalshiRESTClient
 
 
@@ -358,6 +359,28 @@ def grid_search(
             log.info(f"  Tested {i + 1}/{len(configs)} configs...")
 
     results.sort(key=lambda x: x["quality"], reverse=True)
+
+    # Compute Deflated Sharpe Ratio to penalize multiple testing
+    # Uses quality scores as a Sharpe-like metric across all trials
+    if len(results) >= 3:
+        quality_scores = [r["quality"] for r in results]
+        best_quality = results[0]["quality"]
+        n_trials = len(results)
+        # train_length = total trades replayed (proxy for observation count)
+        train_len = max(1, results[0].get("mean_score", 1) * 100)  # rough proxy
+        dsr, e_max = calculate_deflated_sharpe(
+            best_quality, quality_scores, n_trials, max(n_trials, 20)
+        )
+        # Attach DSR metadata to results for reporting
+        for r in results:
+            r["_dsr_meta"] = {
+                "dsr": dsr,
+                "expected_max_noise": e_max,
+                "n_trials": n_trials,
+            }
+        log.info(f"Grid DSR: {dsr:.4f} (expected max noise quality={e_max:.3f}, "
+                 f"best quality={best_quality:.3f}, {n_trials} trials)")
+
     return results
 
 
@@ -583,6 +606,22 @@ def print_grid_report(results: list[dict]):
         print(f"\n  Worst: quality={worst['quality']:.3f}  "
               f"NONE={worst['none_pct']:.1%} LOG={worst['log_pct']:.1%} "
               f"NOTABLE={worst['notable_pct']:.1%} ALERT={worst['alert_pct']:.1%}")
+
+    # Deflated Sharpe Ratio warning
+    dsr_meta = results[0].get("_dsr_meta")
+    if dsr_meta:
+        dsr = dsr_meta["dsr"]
+        print(f"\n--- Multiple Testing Audit (Deflated Sharpe Ratio) ---")
+        print(f"  Trials tested:        {dsr_meta['n_trials']}")
+        print(f"  Expected max(noise):  {dsr_meta['expected_max_noise']:.3f}")
+        print(f"  Best quality:         {results[0]['quality']:.3f}")
+        print(f"  DSR:                  {dsr:.4f}")
+        if dsr > 0.95:
+            print(f"  Verdict: LIKELY REAL (DSR > 0.95)")
+        elif dsr > 0.50:
+            print(f"  Verdict: INCONCLUSIVE (0.50 < DSR < 0.95)")
+        else:
+            print(f"  Verdict: *** LIKELY NOISE (DSR < 0.50) — best config may be overfit ***")
 
     # Best config details
     best = results[0]

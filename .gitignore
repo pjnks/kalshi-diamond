@@ -29,5 +29,8 @@ build/
 *.log
 nohup.out
 
+# Lock files
+.diamond_monitor.lock
+
 # Claude
 .claude/
