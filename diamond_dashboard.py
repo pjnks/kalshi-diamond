@@ -208,6 +208,17 @@ def _load_volume_timeline(hours_back: int = 6) -> pd.DataFrame:
         )
         if not df.empty:
             df["time"] = pd.to_datetime(df["bucket_ts"], unit="s", utc=True).dt.tz_convert("US/Eastern")
+            # Reindex to fill gaps with zeros (WebSocket outages leave missing buckets)
+            full_range = pd.date_range(
+                start=df["time"].min().floor("5min"),
+                end=df["time"].max().ceil("5min"),
+                freq="5min",
+                tz="US/Eastern",
+            )
+            df = df.set_index("time").reindex(full_range).fillna(0).rename_axis("time").reset_index()
+            df["total_volume"] = df["total_volume"].astype(int)
+            df["trade_count"] = df["trade_count"].astype(int)
+            df["active_tickers"] = df["active_tickers"].astype(int)
         return df
     except Exception:
         return pd.DataFrame()
