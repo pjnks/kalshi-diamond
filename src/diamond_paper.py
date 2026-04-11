@@ -851,12 +851,27 @@ class PaperTradingEngine:
                 # Log summary periodically
                 stats = self._store.get_paper_stats()
                 if stats["total"] > 0:
+                    # Order hygiene check: stale pending orders indicate
+                    # _cancel_after failures (session recycling, shutdown)
+                    stale_pending = self._store._conn.execute(
+                        "SELECT COUNT(*) FROM paper_trades "
+                        "WHERE status = 'pending' AND opened_at < ?",
+                        (time.time() - 120,),  # >2 min old = stale
+                    ).fetchone()[0]
+                    hygiene = ""
+                    if stale_pending > 0:
+                        hygiene = f", STALE_PENDING={stale_pending}⚠"
+                        log.warning(
+                            f"[PAPER] {stale_pending} stale pending orders "
+                            f"(>2min old) — possible _cancel_after failure"
+                        )
                     log.info(
                         f"[PAPER] Status: {stats['open_positions']} open, "
                         f"{stats['settled']} settled, "
                         f"P&L={stats['total_pnl_cents']:+.0f}¢, "
                         f"win={stats['win_rate']:.0%}, "
                         f"daily_spend={stats['daily_spend_cents']}¢"
+                        f"{hygiene}"
                     )
             except Exception as e:
                 log.error(f"[PAPER] Poll loop error: {e}")

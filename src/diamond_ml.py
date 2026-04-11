@@ -95,8 +95,16 @@ class DiamondMLScorer:
 
     # ── Data Extraction ───────────────────────────────────────────────
 
-    def extract_training_data(self) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+    def extract_training_data(
+        self, min_opened_at: float | None = None,
+    ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
         """Extract labeled training data from settled paper trades.
+
+        Args:
+            min_opened_at: If provided, only include trades opened after this
+                epoch timestamp. Use to filter to post-penalty data regimes
+                (e.g., post-Sprint 11) and prevent distribution shift from
+                contaminating the model.
 
         Returns:
             X: Feature DataFrame
@@ -115,9 +123,13 @@ class DiamondMLScorer:
               AND features_json IS NOT NULL
               AND pnl_cents IS NOT NULL
               AND settled_at IS NOT NULL
-            ORDER BY opened_at ASC
         """
-        rows = conn.execute(query).fetchall()
+        params: tuple = ()
+        if min_opened_at is not None:
+            query += "      AND opened_at >= ?\n"
+            params = (min_opened_at,)
+        query += "    ORDER BY opened_at ASC"
+        rows = conn.execute(query, params).fetchall()
         conn.close()
 
         if not rows:
@@ -398,13 +410,18 @@ class DiamondMLScorer:
 
     # ── Training ──────────────────────────────────────────────────────
 
-    def train(self, min_samples: int = 100) -> dict:
+    def train(self, min_samples: int = 100, min_opened_at: float | None = None) -> dict:
         """Train tiered model pipeline.
+
+        Args:
+            min_samples: Minimum settled trades to proceed with training.
+            min_opened_at: If provided, only train on trades opened after this
+                epoch timestamp. Critical for post-penalty regime isolation.
 
         Returns metrics dict with model_type, brier, auc, feature_importance, etc.
         All comparison metrics use ONLY held-out CV predictions with PiT purging.
         """
-        X, y, meta = self.extract_training_data()
+        X, y, meta = self.extract_training_data(min_opened_at=min_opened_at)
 
         if len(y) < min_samples:
             msg = f"Not enough samples ({len(y)} < {min_samples})"

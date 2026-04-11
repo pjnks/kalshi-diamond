@@ -31,13 +31,18 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def cmd_train(scorer: DiamondMLScorer):
+def cmd_train(scorer: DiamondMLScorer, min_opened_at: float | None = None):
     """Train model and show results."""
     print("\n" + "=" * 70)
     print("  DIAMOND ML SCORER — TRAINING")
     print("=" * 70)
 
-    metrics = scorer.train(min_samples=ML_MIN_SAMPLES)
+    if min_opened_at is not None:
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(min_opened_at, tz=timezone.utc)
+        print(f"\n  Filtering to trades opened after {dt.strftime('%Y-%m-%d %H:%M UTC')}")
+
+    metrics = scorer.train(min_samples=ML_MIN_SAMPLES, min_opened_at=min_opened_at)
 
     if "error" in metrics:
         print(f"\n  ERROR: {metrics['error']}")
@@ -202,7 +207,22 @@ def main():
                         help="Replay trades with ML edge filter")
     parser.add_argument("--null-test", action="store_true",
                         help="Run null importance test only")
+    parser.add_argument("--since", type=str, default=None,
+                        help="Only train on trades after this date (YYYY-MM-DD). "
+                             "Use to isolate post-penalty data regimes. "
+                             "E.g., --since 2026-04-02 for post-Sprint 11 data.")
     args = parser.parse_args()
+
+    # Parse --since to epoch timestamp
+    min_opened_at = None
+    if args.since:
+        from datetime import datetime, timezone
+        try:
+            dt = datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            min_opened_at = dt.timestamp()
+        except ValueError:
+            print(f"ERROR: Invalid date format '{args.since}'. Use YYYY-MM-DD.")
+            sys.exit(1)
 
     scorer = DiamondMLScorer(db_path=DB_PATH, model_path=ML_MODEL_PATH)
 
@@ -211,7 +231,7 @@ def main():
     elif args.compare or args.backtest:
         cmd_compare(scorer)
     else:
-        cmd_train(scorer)
+        cmd_train(scorer, min_opened_at=min_opened_at)
         # Auto-run comparison after training
         cmd_compare(scorer)
 
