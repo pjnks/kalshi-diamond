@@ -33,6 +33,9 @@ Kalshi WebSocket ──► Stream Processor ──► Two-Stage Engine ──►
 ### Market Discovery
 The Kalshi `/markets` list endpoint returns `volume_fp=0` for ALL markets (broken as of March 2026). Instead, `refresh_markets()` discovers active tickers from **recent trades** via `/markets/trades` (3 pages), then fetches individual market details. This is the only reliable way to find active markets.
 
+### Category Derivation (Sprint 11, April 2026)
+The Kalshi API has **no `category` field** in market responses. Category is derived from the ticker prefix via `_category_from_ticker()` in `diamond_monitor.py`. Longest-match lookup against `_TICKER_CATEGORY_MAP` (e.g., `KXNCAAMB` → "NCAA MBB", `KXNBA` → "NBA", `KXBTC` → "Crypto"). Fallback: strip digits/hyphens from prefix. This was previously broken (all trades recorded as `category=NULL`), which prevented the Dynamic Threshold Manager (CTM) from functioning.
+
 ### Warmup Period
 The monitor has a **3-minute warmup** (`WARMUP_SEC = 180`) after startup. During warmup, trades are scored and anomalies recorded to SQLite, but alert dispatch (Pushover/macOS) and trade placement are suppressed. This prevents false positive floods during cold start when profiles are empty.
 
@@ -44,6 +47,17 @@ The monitor has a **3-minute warmup** (`WARMUP_SEC = 180`) after startup. During
 
 ### Single-Instance Guard
 `diamond_monitor.py` uses `fcntl.flock()` on `.diamond_monitor.lock` to prevent duplicate instances. The kernel-level lock auto-releases on process death (including `kill -9`), so there's no stale lock file problem. Combined with systemd's `Restart=always`, this guarantees exactly one monitor process.
+
+### Dynamic Threshold Manager (`src/diamond_threshold_manager.py`)
+Context-aware ALERT threshold adjustment based on two rolling dimensions:
+- **Category performance:** Rolling win rate per market category (NBA, ATP Tennis, etc.). Categories with positive edge get lower thresholds (easier entry), negative edge get higher thresholds.
+- **Time-of-day performance:** Rolling win rate per UTC hour. Replaces the hardcoded 5-7pm ET score penalty with data-driven threshold adjustment.
+- **Additive combination:** `effective = base + category_adj + hour_adj`, clamped to [FLOOR, CEIL].
+- **Cold start:** Buckets with < CTM_MIN_N trades use the base threshold (no adjustment).
+- **Score stays clean:** Adjustments go into the threshold, not the score. Raw anomaly scores in the DB are uncontaminated.
+- **Config:** `CTM_ENABLED`, `CTM_WINDOW_N=100`, `CTM_MIN_N=30`, `CTM_SENSITIVITY=0.20`, `CTM_MAX_CAT_ADJ=0.08`, `CTM_MAX_HOUR_ADJ=0.06`, `CTM_THRESHOLD_FLOOR=0.40`, `CTM_THRESHOLD_CEIL=0.72`.
+- **Refresh:** Re-loads from DB every 5 min via `maybe_refresh()`. Incremental updates via `on_settlement()` after each trade settles.
+- **Dashboard:** `get_dashboard_state()` exposes per-category and per-hour thresholds for visualization.
 
 ### Live Trading Engine (`src/diamond_paper.py`)
 Auto-places real Kalshi orders when anomalies reach ALERT level or above:
@@ -59,6 +73,7 @@ Auto-places real Kalshi orders when anomalies reach ALERT level or above:
 - **Handles Kalshi `executed` status:** Orders on settled markets properly cleaned up
 - **Notifications:** Pushover alerts for fills, settlements, flips, kill switch, order failures
 - **Session recycling:** aiohttp session auto-recreates every 30 min; force-recycles on connection errors
+- **Tiered contract sizing:** CRITICAL (≥0.78): 3 contracts, High ALERT (0.65–0.77): 2 contracts, Low ALERT (0.55–0.64): 1 contract. Kill switch estimate uses same tiered count.
 - **Skipped trade logging:** All trade rejections (dedup, conviction block, min price, burst throttle, kill switch, category/event limits) logged to `skipped_trades` table with reason and detail for dashboard visibility
 
 ### Conviction System (`src/diamond_conviction.py`)
@@ -89,7 +104,7 @@ Event-aware trade management preventing both-sides positions:
 Optional tiered ML pipeline running in shadow mode (logging, not acting) until validated:
 - **Feature set:** 9 raw features + 4 engineered (n_features_firing, max_feature_score, entry_price_cents, side_is_yes, category_target_enc). `composite_x_price` was REMOVED due to multicollinearity with raw inputs.
 - **Null importance test:** 100-iteration permutation test; features kept only if real importance > 95th percentile of null distribution
-- **Tier 1 (Lasso):** L1-regularized logistic regression — always the baseline, auto-zeros noise features
+- **Tier 1 (Elastic Net):** L1+L2 regularized logistic regression (l1_ratio=0.7) — achieves sparsity while sharing weight among correlated features for day-to-day stability. Upgraded from pure Lasso (l1_ratio=1.0) per quant review (March 2026).
 - **Tier 2 (GBM):** GradientBoosting — requires **1000+ samples** (raised from 150) and must beat Lasso by >0.005 Brier. At current trade rates, GBM is effectively disabled for months.
 - **Edge prediction:** `edge = P_calibrated(win) - P_market(win)` — positive edge = favorable mispricing
 - **Kelly sizing:** NOT YET IMPLEMENTED — requires 60+ days of shadow-mode validation with calibration slope in [0.8, 1.2] before edge estimates can be trusted for sizing
@@ -97,6 +112,19 @@ Optional tiered ML pipeline running in shadow mode (logging, not acting) until v
   - Category target encoding recomputed per CV fold (prevents test-label leakage)
   - StandardScaler fit per fold on training data only (prevents feature distribution leakage)
   - Global scaler/encoding retained for final production model fit only
+- **Point-in-Time (PiT) purging (quant friend audit, March 2026):**
+  - Training only on trades whose `settled_at < test_fold_opened_at` (prevents future label leakage from overlapping contracts)
+  - Nested null importance testing inside CV folds using only purged data (prevents data snooping)
+  - Time-series Platt scaling via `TimeSeriesSplit(n_splits=5)` (replaces random `StratifiedKFold`)
+  - Nested target encoding per fold with PiT win rates for unseen categories
+  - `penalty="elasticnet"` fix in null importance test (was silently running ridge/L2)
+  - Zero-fold guard: refuses to save model when CV produces zero valid folds
+  - Feature stability monitoring: logs set intersection/union across folds
+  - Model factory pattern: `model_factory()` callables for clean fold independence
+  - Latest retrain: 275 samples, 2/5 folds valid, AUC=0.809, Brier=0.180, 3 features kept
+  - **Elastic Net upgrade (Sprint 10):** `l1_ratio=0.7` (was 1.0 pure Lasso). Shares weight among correlated features instead of arbitrarily zeroing one. Improves day-to-day model stability (Jaccard target > 0.70).
+  - **Shadow model evaluator:** `evaluate_shadow_model()` checks both Brier calibration and Jaccard feature set stability before promoting to active. Promotion gate: Brier < 0.25 AND Jaccard ≥ 0.70.
+  - **Needs retrain:** Saved model was trained with broken L2 (missing `penalty` kwarg) and pure L1. Run `PYTHONPATH=. python diamond_ml_train.py` for corrected Elastic Net model.
 
 ### WebSocket Stale Detection (Sprint 8 — March 2026)
 Diamond suffered daily 21+ hour staleness incidents where the WebSocket hung silently (no exception raised from `async for raw in ws`) while `status_report_loop()` kept logging every 60s, fooling the watchdog into thinking the service was healthy. **7-layer defense-in-depth fix:**
@@ -122,7 +150,8 @@ Diamond suffered daily 21+ hour staleness incidents where the WebSocket hung sil
 | `diamond_config.py` | API keys, thresholds, feature weights, trading config |
 | `src/kalshi_client.py` | WebSocket + REST API client (order placement with dollar-string format, session recycling) |
 | `src/diamond_store.py` | SQLite storage + rolling aggregates + paper trade tracking + skipped trades |
-| `src/diamond_features.py` | Two-stage detection: 2 trigger features + 8 scorer features + composite score + probability penalty |
+| `src/diamond_features.py` | Two-stage detection: 2 trigger features + 8 scorer features + composite score + convexity penalty |
+| `src/diamond_threshold_manager.py` | Dynamic ALERT threshold by category + hour-of-day (rolling win rate) |
 | `src/diamond_conviction.py` | Event-aware conviction tracking (BLOCK/FLIP) |
 | `src/diamond_analytics.py` | Self-learning: feature attribution, Brier decomposition, DSR, co-firing audit, adaptive weights |
 | `src/diamond_alerts.py` | Alert engine with level-aware cooldowns |
@@ -164,8 +193,9 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - **Deploy:** `./deploy.sh --restart` from local Mac (uses scp, not git)
 - **Processes:** Monitor + Dashboard run as systemd services (`diamond-monitor.service`, `diamond-dashboard.service`)
 - **Process management:** ALWAYS use `sudo systemctl restart diamond-monitor` — NEVER use nohup/pkill. Systemd has `Restart=always`, so manually launched processes will create duplicates. The monitor's `fcntl.flock()` PID lock prevents this, but systemd is the correct interface.
-- **Memory limit:** 350MB via systemd drop-in (`/etc/systemd/system/diamond-monitor.service.d/memory-limit.conf`) — raised from 250MB (startup peaked at 272MB)
+- **Memory limit:** 600MB via systemd drop-in (`/etc/systemd/system/diamond-monitor.service.d/memory-limit.conf`) — raised from 350MB after April 3 OOM crash loop. OOMScoreAdjust=-500.
 - **Stop timeout:** 15s via same drop-in (`TimeoutStopSec=15`) — prevents 90s hang on restart
+- **Consolidated dashboard:** Stopped and disabled (freed 93MB). Was running unbounded without MemoryMax on a 956MB VM.
 - **Unbuffered output:** `python -u` in ExecStart — ensures logs appear immediately (not buffered)
 - **Logs:** `tail -f /home/ubuntu/kalshi-diamond/diamond_monitor.log` (uses `StandardOutput=append`, NOT journald)
 - **Note:** Git not yet set up on OCI. Using scp via `deploy.sh` instead.
@@ -188,8 +218,8 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - Notification pattern reused from HMM-Trader's `src/notifier.py`
 - Gemstone naming: prefix files with `diamond_` for project-specific modules
 
-## Current Status (March 28, 2026)
-**Live trading active on OCI — 213 settled trades, 46% win rate, -$4.00 cumulative P&L.**
+## Current Status (April 4, 2026)
+**Live trading active on OCI — 472 settled trades, 49% win rate, -$8.52 cumulative P&L. Sprint 12 deployed.**
 - Steps 1-8: Core system ✓
 - Dashboard Redesign ✓ (futuristic terminal aesthetic, glassmorphism, Inter + JetBrains Mono)
 - Live Trading Engine ✓ (auto-bet on ALERT+, GTC orders, kill switch, settlement tracking)
@@ -198,7 +228,12 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - Min Price Filter ✓ (skip trades ≤ 5¢)
 - GitHub Repo ✓ (`pjnks/kalshi-diamond`, private)
 - Two-Stage Pipeline ✓ (PhD review: triggers separated from scorers — March 2025)
-- Probability Penalty ✓ (longshot score discount — March 2025)
+- ~~Probability Penalty~~ → **Convexity Price Penalty ✓** (inverted: penalize favorites/mid, not longshots — Sprint 10, March 2026)
+- ~~Time-of-Day Suppression~~ → **Dynamic Threshold Manager ✓** (replaces hardcoded penalty with rolling per-category + per-hour threshold adjustment — Sprint 10, March 2026)
+- **lasso_factory L1 fix ✓** (was missing `penalty="elasticnet"`, silently trained L2 ridge — Sprint 10, March 2026)
+- **side_is_yes inference fix ✓** (was hardcoded 0.5, now uses real taker side — Sprint 10, March 2026)
+- **_exit_position return type fix ✓** (consistent bool returns — Sprint 10, March 2026)
+- **sweep_score streak commit fix ✓** (final streak captured after loop — Sprint 10, March 2026)
 - Peer Review Fixes ✓ (DSR, co-firing audit, CV leakage fixes — March 2025)
 - Single-Instance Guard ✓ (`fcntl.flock` PID lock — March 2026)
 - Systemd-Only Deploys ✓ (deploy.sh uses systemctl, no more nohup — March 2026)
@@ -207,9 +242,24 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - WebSocket Crash Loop Alerts ✓ (Pushover after 10 consecutive errors)
 - **7-Layer Stale Detection ✓ (recv timeout + data freshness + auto-reconnect + stale logs + watchdog file check + unbuffered output + fast shutdown — March 2026)**
 - Platform Guard ✓ (osascript skipped on Linux — March 2026)
-- DB Pruning Tightened ✓ (30d → 7d — March 2026)
-- Memory Limit Raised ✓ (250MB → 350MB — March 2026)
+- DB Pruning Tightened ✓ (30d → 7d → 2d — March/April 2026)
+- Memory Limit Raised ✓ (250MB → 350MB → 600MB — March/April 2026)
 - Asyncio-Safe Signal Handlers ✓ (`loop.add_signal_handler` — March 2026)
+- **ML Pipeline PiT Purging ✓ (point-in-time CV, nested null importance, nested encoding, time-series Platt — March 2026)**
+- **Tiered Contract Sizing ✓ (CRITICAL=3, High ALERT=2, Low ALERT=1 — March 2026)**
+- **ALERT Threshold Revert ✓ (0.50→0.55, lower threshold bled -$5.37/day — March 2026)**
+- **Elastic Net Upgrade ✓** (l1_ratio=0.7, shares weight among correlated features — Sprint 10, March 2026)
+- **Jaccard Stability Tracking ✓** (feature set turnover across CV folds + shadow model evaluator — Sprint 10, March 2026)
+- **Category Derivation Fix ✓** (Kalshi API has no category field — derive from ticker prefix via `_category_from_ticker()`. Unblocks CTM — Sprint 11, April 2026)
+- **Convexity Penalty Tightened ✓** (25-49¢ halted at ×0.50, 50-74¢ ×0.85, 75¢+ ×0.75. Based on N=441 forensic: 25-49¢ was -$13.06 / 27% WR — Sprint 11, April 2026)
+- **YES-Side Retail Flow Penalty ✓** (×0.85 on YES-side trades. 92% of trades were YES at 41% WR — retail noise, not informed flow — Sprint 11, April 2026)
+- **OOM Crash Loop Fix ✓** (14 OOM kills on April 3 — root causes: mmap cgroup inflation, oversized DB, OOMScoreAdjust=+300, consolidated-dashboard unbounded — Sprint 12, April 2026)
+- **MemoryMax Raised ✓** (350MB → 600MB, OOMScoreAdjust=-500 — Sprint 12, April 2026)
+- **Asyncio Event Loop Protection ✓** (ML retrain → asyncio.to_thread, inline VACUUM removed, profile updates limited to cache, cooperative yield — Sprint 12, April 2026)
+- **Watchdog Fix ✓** (was checking journald, monitor uses StandardOutput=append to file — fixed to check log file mtime — Sprint 12, April 2026)
+- **Consolidated Dashboard Disabled ✓** (stopped + disabled, 93MB freed — Sprint 12, April 2026)
+- **DB Pruning Tightened ✓** (7d → 2d — Sprint 12, April 2026)
+- **SQLite mmap_size=256MB ✓** (explicit enable — platform default is 0, disabling causes 3,500+ pread64/sec event loop starvation — Sprint 12, April 2026)
 
 ## Trading Configuration (`.env`)
 ```
@@ -229,7 +279,7 @@ PAPER_MAX_TRADES_PER_5MIN=8        # Burst throttle
 ```
 
 ### Trading Rules
-- Every ALERT+ signal (score ≥ 0.55) places a real order
+- Every ALERT+ signal (score ≥ 0.55) places a real order with **tiered sizing**: CRITICAL=3 contracts, High ALERT=2, Low ALERT=1
 - Min price filter: skips contracts ≤ 5¢ to avoid longshot bleed
 - GTC limit orders with book-aware pricing (best ask + cross margin by tier)
 - **Aggressive auto-cancel:** Unfilled orders cancelled after 15s (ALERT) / 30s (CRITICAL) — prediction market alpha decays in seconds, resting orders past signal half-life are adverse selection bait
@@ -246,7 +296,9 @@ PAPER_MAX_TRADES_PER_5MIN=8        # Burst throttle
 **Stage 1 — Triggers (boolean gates):** `trade_size_zscore` and `volume_spike_ratio` must BOTH fire (score > 0) to activate scoring. These fire on 94-99% of ALERTs — necessary conditions, not predictors. Removed from weighted model entirely (weight=0) to avoid suppressing discriminative features.
 **Stage 2 — Scorer weights (8 features, sum=1.0):** skew=0.256, sweep=0.192, velocity=0.154, imbalance=0.154, book_delta=0.077, impact=0.064, concentration=0.064, correlation=0.038.
 **Composite scoring:** Capped weight redistribution (max 1.5×, 1.3× for <3 discriminative features).
-**Probability penalty:** Longshots require higher scores — contracts <25¢ penalized ÷1.35, contracts 25-49¢ penalized ÷1.15, contracts ≥50¢ no penalty. This replaces a hard min-price cutoff with a continuous penalty visible in anomaly logging.
+**Convexity price penalty (Sprint 11, April 2026):** Tightened from Sprint 10 based on N=441 forensic analysis. 25-49¢ bucket halted (×0.50) — was -$13.06 / 27% WR, the primary bleed source. 50-74¢ lightly penalized (×0.85) — marginal +$4.04 / 58% WR, strong signals only. 75¢+ penalized (×0.75) — expensive losers wipe out high WR gains. <25¢ unpenalized (only profitable bucket).
+**YES-side retail flow penalty (Sprint 11, April 2026):** Additional ×0.85 penalty on YES-side trades. Live data: 92% of trades were YES-side at 41% WR — retail overwhelmingly buys YES on favorites/popular narratives. NO-side flow is rarer and more likely informed. Combined with price penalty, YES@25-49¢ is effectively impossible (needs raw score >1.29, capped at 1.0).
+**Time-of-day suppression (Sprint 10, March 2026):** 25% score penalty during 21-23 UTC (5-7 PM ET) when pre-game sports volume surges trigger `volume_spike_ratio` seasonally (26-36% WR in this window). Bypassed if `cross_market_correlation > 0.8` (breaking news).
 **Adaptive weights:** Blocked until N=500 settled trades (~2 weeks at current rates). PhD review: N=204 is insufficient for stable 8-parameter estimation. Do NOT activate early.
 
 ### Current Alert Thresholds
@@ -271,7 +323,7 @@ CRITICAL=30s, ALERT=2.5min, NOTABLE=5min, with escalation bypass.
 - **Animated gradient header border** (cyan↔violet shifting)
 - **Glassmorphism panels** with `backdrop-filter: blur(12px)`, subtle cyan border glow
 - **6 metric cards:** Trades, Markets, Anom Rate, Logged, Alert, Critical — with hover lift effect
-- **Volume + anomaly timeline:** 5-min buckets, last 6 hours, cyan→violet gradient bars
+- **Volume + anomaly timeline:** 5-min buckets, last 6 hours, cyan→violet gradient bars, gap-filled (reindexed to show zero bars during WebSocket outages instead of missing space)
 - **Feature radar chart:** Cyan glowing stroke, translucent fill
 - **Top markets bar chart:** Gradient fill (cyan → violet)
 - **Feature weights & alert thresholds** reference panel
@@ -302,8 +354,9 @@ SQLite at `diamond_trades.db`. Key tables:
 - `skipped_trades` — rejected trade attempts with reason/detail (dedup, conviction_block, min_price, burst_throttle, kill_switch, category_limit, event_limit, max_positions)
 
 Schema migrations handled via `ALTER TABLE ADD COLUMN` in `DiamondStore._migrate()`.
-Pruning: book snapshots at 2 days, trades/anomalies at 7 days (reduced from 30; feature engine only uses 24h), conviction signals at 2 hours.
+Pruning: book snapshots at 2 days, trades/anomalies at 2 days (reduced from 7; feature engine only uses 24h), conviction signals at 2 hours.
 DB index on `anomalies(ts)` for cross_market query performance.
+**VACUUM:** Removed from inline code — it rewrites the entire DB file and blocks the asyncio event loop for minutes on a 1-OCPU VM. Run manually when needed: `sqlite3 diamond_trades.db "VACUUM"`.
 
 ### Paper Trades Table
 ```sql
@@ -357,6 +410,10 @@ skipped_trades (
 - **IOC orders don't fill:** Kalshi markets are thin. IOC (immediate-or-cancel) orders expire immediately if no liquidity. Switched to GTC with slippage adjustment.
 - **OCI process management:** Always use `sudo systemctl restart diamond-monitor` (not pkill + nohup) to avoid duplicate processes. Systemd auto-restarts killed services, so manual nohup launches will create duplicates. The fcntl PID lock is a safety net but systemd is the correct interface.
 - **NaN market titles:** Some market titles come back as NaN (float) from DB. Always use `str()` when displaying.
+- **SQLite mmap and cgroups:** On Linux with systemd, `PRAGMA mmap_size=N` causes file-backed mmap pages to count against MemoryMax. A 400MB DB can inflate cgroup to 300MB+ even with 72MB RSS. But `mmap_size=0` forces pread64 syscalls (3,500+/sec) which starves the asyncio event loop. Current solution: mmap_size=256MB + MemoryMax=600MB.
+- **VACUUM blocks the event loop:** SQLite VACUUM rewrites the entire DB file synchronously. On a 1-OCPU VM this takes minutes. NEVER run VACUUM inline in the monitor — run it manually. The `_last_vacuum` attribute also resets to 0 on every restart, so periodic VACUUM timers fire on every startup.
+- **Synchronous DB writes in async code:** Any `store.*()` call is synchronous SQLite. Loops over 100+ tickers with per-ticker DB writes will block the event loop for minutes. Always limit batch sizes or use `asyncio.to_thread()` for large operations.
+- **Watchdog checks log file, not journald:** Diamond uses `StandardOutput=append` (writes to file), NOT journald. The watchdog must check the log file's mtime, not `journalctl` timestamps. Getting this wrong causes the watchdog to kill a healthy process every ~75 minutes.
 
 ## OCI Deployment Details
 - **Instance:** Oracle Cloud Infrastructure Compute (Ubuntu, hostname `hmm-trader`)
@@ -367,7 +424,7 @@ skipped_trades (
 - **Manual restart:** `ssh -i ~/.ssh/hmm-trader.key ubuntu@129.158.40.51 'sudo systemctl restart diamond-monitor'`
 - **Git:** Not set up on OCI yet. GitHub repo exists at `pjnks/kalshi-diamond` but OCI uses scp.
 - **Also running:** CITRINE dashboard on :8070 (separate project)
-- **Memory limit:** 350MB via systemd drop-in config (raised from 250MB)
+- **Memory limit:** 600MB via systemd drop-in (`/etc/systemd/system/diamond-monitor.service.d/memory-limit.conf`), raised from 350MB after April 3 OOM crash loop. OOMScoreAdjust=-500 (protected from kernel OOM killer).
 
 ## 24/7 Operation
 - **Primary:** OCI compute instance (always-on, no lid-close issues)
@@ -378,21 +435,49 @@ skipped_trades (
 - Pushover alerts on order failures and WebSocket crash loops ensure silent failures are caught
 - Single-instance guard (fcntl PID lock) prevents duplicate processes even if deployment goes wrong
 
-## Performance Summary (as of March 28, 2026)
-- **Settled trades:** 213
-- **Win rate:** 46% (98/213)
-- **Cumulative P&L:** -$4.00 (essentially flat on $1 sizing — strong foundation per PhD review)
+### Asyncio Event Loop Protection (Sprint 12, April 2026)
+Three independent sources of event loop starvation were discovered and fixed during the April 3 crash-loop investigation:
+1. **ML retrain** — `scorer.train()` is synchronous sklearn (100 permutation fits, 10+ min on 1-OCPU). Now wrapped in `asyncio.to_thread()` to offload to thread pool.
+2. **Inline VACUUM** — `prune_old_data()` had a 6-hour VACUUM timer, but `_last_vacuum` reset to 0 on every restart → VACUUM ran on every startup, blocking the event loop for minutes while rewriting the entire DB. Removed entirely (run manually when needed).
+3. **1,212 profile updates** — `metadata_refresh_loop()` was calling `store.get_all_active_tickers()` which returned all historical tickers from DB, not just current market cache (~76-99 active). Each got a synchronous DB write. Fixed to use `list(market_cache.keys())`.
+4. **Cooperative yield** — Added `await asyncio.sleep(0)` at end of `on_trade()` to prevent WebSocket message flood (500-1300 trades/min) from starving status_report_loop and paper_engine.poll_loop.
+
+### SQLite Memory & Cgroup Accounting (Sprint 12, April 2026)
+On Linux with systemd cgroups, `PRAGMA mmap_size=N` causes file-backed mmap pages to count against the process's MemoryMax budget. A 394MB DB + 273MB WAL inflated cgroup usage to 310MB even though actual process RSS was only 72MB. Current config:
+- `PRAGMA mmap_size=268435456` (256MB) — enabled for performance (disabling caused 3,500+ pread64 syscalls/sec which also starved the event loop)
+- `PRAGMA synchronous=NORMAL` — reduces disk I/O blocking
+- `PRAGMA journal_mode=WAL` — concurrent read/write
+- MemoryMax raised to 600MB to accommodate mmap overhead
+
+## Performance Summary (as of April 4, 2026)
+- **Settled trades:** 472
+- **Win rate:** 49% (231W / 241L)
+- **Cumulative P&L:** -$8.52
 - **Fill rate:** ~91% of placed orders fill
-- **Key finding:** Winners enter at ~61¢ avg, losers at ~37¢ avg — detector finds signal in favorites but bleeds on longshots. Probability penalty addresses this but needs N=500 to evaluate.
+- **By alert level:** CRITICAL: ~9 trades, 78% WR, +$2.18 P&L — ALERTs: ~460+ trades, 49% WR. CRITICALs dramatically outperform.
+- **By price bucket:** <25¢: 56 trades, 18% WR, +$1.18 (ONLY profitable). **25-49¢: 135 trades, 27% WR, -$13.06 (halted in Sprint 11).** 50-74¢: 169 trades, 58% WR, +$4.04. 75¢+: 81 trades, 81% WR, -$0.63.
+- **Score discrimination:** Zero. Win avg=0.598, loss avg=0.591 (composite score cannot distinguish winners from losers).
+- **Threshold experiment:** Lowering ALERT from 0.55→0.50 (Mar 29) produced 51 trades at -$5.37/day. Reverted — marginal signals lack edge to overcome spread. Do NOT lower again without ML validation.
+- **Tiered sizing deployed:** CRITICAL=3 contracts, High ALERT=2, Low ALERT=1.
+- **ML model:** AUC=0.809, Brier=0.180. Needs retrain. Shadow mode only.
 - **WebSocket health:** ~46 reconnects/day (keepalive timeouts), all auto-recovered
-- **Open positions:** Typically 5-8 at any time
+- **Sprint 11 impact (early signal, N=15):** Post-deployment (Apr 3+): 15 trades, 80% WR, +$0.48. Caveat: N=15 is not statistically significant (SE ≈ 0.26). Need 15+ days for valid assessment.
+- **April 3 dark period:** 15-hour gap in paper trades (02:25–17:50 UTC) due to OOM crash loop. Raw trade data captured (254K trades) but paper trades cannot be retroactively simulated — anomaly scoring is state-dependent and path-dependent.
 
 ## Next Steps / Roadmap
-- **Collect N=500 settled trades** (~2 weeks at current rates) for adaptive weight activation
-- **Evaluate probability penalty impact:** Does the longshot score discount improve the win/loss price asymmetry?
-- **Feature attribution analysis:** Which of the 8 scorers predict price movement best?
-- **Win rate by alert level:** Do CRITICALs outperform ALERTs?
-- **Category breakdown:** Sports vs politics vs crypto performance (requires fixing NULL categories in DB)
-- **Score-scaled sizing:** Once win rates known, increase bet size for higher-conviction signals
-- **Kelly criterion sizing:** After sufficient settlement data + ML validation, size by estimated edge
+- ✅ **[DONE] Monitor Sprint 11 penalty impact** — Post-deployment (Apr 3-4): 15 trades, 80% WR, +$0.48. Trade volume dropped as expected. N=15 is too small for conclusions (need 15+ days).
+- ✅ **[DONE] Backfill categories on historical trades** — 493/493 paper_trades updated from NULL → derived category (April 2, 2026).
+- ✅ **[DONE] OOM crash loop stabilization (Sprint 12)** — 7 independent fixes: MemoryMax 600MB, OOM=-500, inline VACUUM removed, ML→asyncio.to_thread, profile updates limited, watchdog→file check, consolidated-dashboard disabled.
+- **[DO NOT] Flip `CTM_ENABLED=true`** — Keep disabled until **N > 1,500 settled trades** (~5-6 weeks). With ~472 trades across ~15 categories × 24 hours, most CTM buckets have N < 5. Optimizing on N < 30 per bucket guarantees extreme overfitting via bias-variance tradeoff. Categories are backfilled for data integrity and ML features, NOT for CTM activation.
+- **[THIS WEEK] Retrain ML model** — `PYTHONPATH=. python diamond_ml_train.py` with corrected Elastic Net (`l1_ratio=0.7`) + 3 new binned interaction features (`is_longshot_yes`, `is_favorite_no`, `is_mid_yes_spike`). Run `--null-test` to validate the binned features survive permutation test. The composite score has zero discrimination; ML with disjoint regime indicators is the path.
+- **[THIS WEEK] Deploy backtest fixes** (quant friend audit, confirmed present):
+  - [CRITICAL] Directional precision evaluator — replace abs-move "hit" with MFE/MAE relative to trade side
+  - [CRITICAL] EV-based grid search objective — replace cosmetic distribution penalty with expected value optimization
+  - [HIGH] Mid-price edge anchoring — use order book mid-price instead of entry_price for ML edge calculation
+  - [MEDIUM] Sweep/impact latency documentation — backtest doesn't account for post-trade price movement
+- **[ONGOING] Collect post-Sprint 11 out-of-sample data** — Need 15+ days (until ~April 17) with paired t-test on daily P&L for valid assessment of penalty impact. Do NOT draw conclusions from N < 50 trades.
+- **[ONGOING] Track Jaccard stability** — if feature set turnover > 0.50 for 3 consecutive retrains, halt shadow model.
+- **[ONGOING] Shadow P&L on skipped trades** — The execution-layer hard block (YES@25-49¢) prevents observing outcomes for blocked trades. Must periodically compute hypothetical mark-to-market P&L on `skipped_trades` to detect if a blocked regime becomes profitable.
+- **Kelly criterion sizing:** After ML shadow mode validated (Brier < 0.25, Jaccard ≥ 0.70), size by estimated edge
 - **Set up git on OCI:** Replace scp deploy with git pull workflow
+- **Consider Hetzner migration:** Current VM (1 OCPU, 956MB) is at the edge. If trade volume grows or ML retrain gets heavier, migrate to Hetzner CCX23 (~$25/mo, 4GB RAM, 2 vCPU).

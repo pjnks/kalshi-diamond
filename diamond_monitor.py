@@ -33,6 +33,8 @@ from diamond_config import (
     CONVICTION_ENABLED,
     CONVICTION_FLIP_THRESHOLD,
     CONVICTION_HALF_LIFE_SEC,
+    CTM_BASE_THRESHOLD,
+    CTM_ENABLED,
     METADATA_REFRESH_SEC,
     PAPER_TRADING_ENABLED,
     REST_POLL_INTERVAL_SEC,
@@ -42,6 +44,7 @@ from src.diamond_alerts import dispatch_alert
 from src.diamond_features import FeatureEngine
 from src.diamond_paper import PaperTradingEngine
 from src.diamond_store import DiamondStore
+from src.diamond_threshold_manager import CategoryThresholdManager
 from src.kalshi_client import KalshiRESTClient, KalshiWSClient
 
 log = logging.getLogger(__name__)
@@ -112,6 +115,81 @@ def _market_display_name(market: dict) -> str:
     if title and yes_sub and yes_sub != title:
         return f"{title} — {yes_sub}"
     return title
+
+
+# ── Ticker prefix → category mapping ────────────────────────────────
+# Kalshi API has no "category" field — derive from the ticker prefix.
+# Prefixes follow KX<CATEGORY><SUBCATEGORY> convention.
+
+_TICKER_CATEGORY_MAP: dict[str, str] = {
+    # Major US sports
+    "KXNBA": "NBA", "KXMLB": "MLB", "KXNHL": "NHL", "KXNFL": "NFL",
+    "KXMLS": "MLS", "KXWNBA": "WNBA",
+    # College sports
+    "KXNCAAMB": "NCAA MBB", "KXNCAAWB": "NCAA WBB", "KXNCAAFB": "NCAA FB",
+    # Tennis
+    "KXATP": "ATP Tennis", "KXWTA": "WTA Tennis",
+    # Soccer / football
+    "KXEPL": "EPL", "KXLALIGA": "La Liga", "KXSERIEA": "Serie A",
+    "KXLIGUE1": "Ligue 1", "KXFIFA": "FIFA", "KXINTLFRIENDLY": "Intl Friendly",
+    "KXUCLW": "UEFA CL", "KXAFCAC": "AFC", "KXLIGAMX": "Liga MX",
+    "KXDIMAYOR": "Colombian Football", "KXEFLCUP": "EFL Cup",
+    "KXURYPD": "Uruguayan Football",
+    # Combat sports
+    "KXUFC": "UFC", "KXPFL": "PFL",
+    # Golf
+    "KXPGA": "PGA Golf", "KXLIV": "LIV Golf", "KXDPWORLD": "DP World Golf",
+    # Motorsport
+    "KXF1": "F1", "KXNASCAR": "NASCAR",
+    # Esports
+    "KXCS2": "CS2", "KXCOD": "Call of Duty",
+    # Cricket
+    "KXIPL": "IPL Cricket", "KXT20": "T20 Cricket",
+    # Basketball (international)
+    "KXCBA": "CBA Basketball", "KXNBL": "NBL Basketball",
+    "KXKBL": "KBL Basketball", "KXEUROLEAGUE": "Euroleague",
+    "KXFIBACHAMPLEAGUE": "FIBA CL", "KXABA": "ABA League",
+    # Hockey (international)
+    "KXSHL": "SHL Hockey",
+    # Crypto
+    "KXBTC": "Crypto", "KXETH": "Crypto", "KXXRP": "Crypto",
+    # Commodities
+    "KXWTI": "Commodities",
+    # Politics / events
+    "KXTRUMP": "Politics", "KXCARNEY": "Politics", "KXSCOTUS": "Politics",
+    "KXNETANYAHU": "Politics",
+    # Weather / temperature
+    "KXHIGH": "Weather",
+    # Economics
+    "KXMARMAD": "Economics",
+    # Parlays / MVE
+    "KXMVE": "Parlay",
+}
+
+
+def _category_from_ticker(ticker: str) -> str:
+    """Derive market category from Kalshi ticker prefix.
+
+    Tries longest prefix match first (e.g., KXNCAAMB before KXNBA).
+    Falls back to extracting the prefix between 'KX' and the first digit.
+    """
+    # Try longest-match first (handles KXNCAAMB vs KXNBA)
+    for prefix_len in range(min(len(ticker), 35), 1, -1):
+        candidate = ticker[:prefix_len]
+        if candidate in _TICKER_CATEGORY_MAP:
+            return _TICKER_CATEGORY_MAP[candidate]
+
+    # Fallback: extract prefix between "KX" and first digit/hyphen
+    if ticker.startswith("KX"):
+        prefix = ""
+        for ch in ticker[2:]:
+            if ch.isdigit() or ch == "-":
+                break
+            prefix += ch
+        if prefix:
+            return prefix.replace("GAME", "").replace("MATCH", "").replace("FIGHT", "")
+
+    return "Other"
 
 
 # ── Trade Handler ─────────────────────────────────────────────────────
@@ -216,10 +294,8 @@ async def on_trade(msg: dict):
                 else:
                     price_cents = 0
                 if taker_side and price_cents:
-                    # Get category from market cache for portfolio intelligence
-                    market_category = None
-                    if ticker in market_cache:
-                        market_category = market_cache[ticker].get("category") or None
+                    # Derive category from ticker prefix (Kalshi API has no category field)
+                    market_category = _category_from_ticker(ticker)
                     await paper_engine.on_anomaly(
                         ticker=ticker,
                         taker_side=taker_side,
@@ -234,6 +310,11 @@ async def on_trade(msg: dict):
             log.info(
                 f"[TEST] {alert_level} {ticker} score={result['composite']:.2f}"
             )
+
+    # Cooperative yield — prevent task starvation when trades arrive
+    # faster than we can process them (500-1300/min from WebSocket).
+    # Without this, status_report_loop and paper_engine.poll_loop starve.
+    await asyncio.sleep(0)
 
 
 # ── Background Tasks ──────────────────────────────────────────────────
@@ -298,13 +379,15 @@ async def metadata_refresh_loop(category: str | None = None):
                 del _cache_fetch_failures[k]
             await refresh_markets(category)
 
-            # Update market profiles for active tickers (with display names from cache)
-            active_tickers = store.get_all_active_tickers()
-            for ticker in active_tickers:
-                title = _market_display_name(market_cache[ticker]) if ticker in market_cache else ""
+            # Update market profiles for active tickers in current cache only
+            # (NOT get_all_active_tickers() which returns 1000+ historical tickers
+            # and blocks the event loop for minutes with synchronous DB writes)
+            cached_tickers = list(market_cache.keys())
+            for ticker in cached_tickers:
+                title = _market_display_name(market_cache[ticker])
                 store.update_market_profile(ticker, title=title)
 
-            # Prune old data
+            # Prune old data (VACUUM removed — run manually when needed)
             store.prune_old_data()
 
         except Exception as e:
@@ -414,11 +497,25 @@ async def main(category: str | None = None):
                 f"flip_threshold={CONVICTION_FLIP_THRESHOLD})"
             )
 
+        # Dynamic threshold manager (category + time-of-day adjustments)
+        threshold_mgr = None
+        if CTM_ENABLED:
+            threshold_mgr = CategoryThresholdManager(
+                store, base_threshold=CTM_BASE_THRESHOLD,
+            )
+            threshold_mgr.load()
+            log.info("[CTM] Dynamic threshold manager initialized")
+
         paper_engine = PaperTradingEngine(
             store, rest, alert_module=alerts_module,
             conviction_tracker=conviction_tracker,
+            threshold_manager=threshold_mgr,
         )
         log.info("[PAPER] Auto-trading enabled")
+
+        # Sweep orphaned resting orders from previous crashes BEFORE
+        # the WebSocket connects and new anomalies start firing.
+        await paper_engine.cancel_orphaned_orders()
 
     # Initial market fetch
     tickers = await refresh_markets(category)
@@ -477,7 +574,12 @@ async def main(category: str | None = None):
                     try:
                         from src.diamond_ml import DiamondMLScorer
                         scorer = DiamondMLScorer(db_path=DB_PATH, model_path=ML_MODEL_PATH)
-                        metrics = scorer.train(min_samples=ML_MIN_SAMPLES)
+                        # Run in thread pool — sklearn is CPU-bound and blocks
+                        # the event loop for 10+ min on a 1-OCPU VM
+                        log.info("[ML] Starting retrain in background thread...")
+                        metrics = await asyncio.to_thread(
+                            scorer.train, min_samples=ML_MIN_SAMPLES
+                        )
                         if "error" not in metrics:
                             log.info(f"[ML] Retrained: {metrics['model_type']}, "
                                      f"Brier={metrics['cv_brier']:.4f}, "

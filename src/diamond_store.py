@@ -28,11 +28,20 @@ class DiamondStore:
         self._conn: sqlite3.Connection | None = None
 
     def connect(self):
-        """Open database connection and create tables."""
+        """Open database connection and enforce strict memory pragmas."""
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
+
+        # WAL mode for concurrent read/write
         self._conn.execute("PRAGMA journal_mode=WAL")
+
+        # Relax sync to reduce disk I/O blocking the async event loop
         self._conn.execute("PRAGMA synchronous=NORMAL")
+
+        # Enable mmap for SQLite — reduces pread64 syscall overhead.
+        # Default is 0 (disabled) on this platform. Set to 256MB.
+        self._conn.execute("PRAGMA mmap_size=268435456")
+
         self._create_tables()
         self._migrate()
         log.info(f"DiamondStore connected: {self._db_path}")
@@ -756,18 +765,60 @@ class DiamondStore:
             result.append(d)
         return result
 
+    # ── Dynamic Threshold Support ────────────────────────────────────
+
+    def get_settled_trades_for_threshold(self, window_n: int) -> list[dict]:
+        """Return recent settled trades for CategoryThresholdManager initialization.
+
+        Pulls window_n × 10 rows total (enough to fill all category + hour
+        buckets with recent data while keeping memory bounded). Returns
+        oldest-first so deque replay produces correct recency ordering.
+
+        Args:
+            window_n: Per-bucket rolling window size (e.g., 100).
+
+        Returns:
+            List of dicts with keys: category, opened_at, pnl_cents.
+        """
+        limit = window_n * 10
+        rows = self._conn.execute(
+            """SELECT category, opened_at, pnl_cents
+               FROM paper_trades
+               WHERE status = 'settled'
+                 AND pnl_cents IS NOT NULL
+               ORDER BY opened_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        # Reverse: replay oldest-to-newest into the deques
+        return [dict(r) for r in reversed(rows)]
+
     # ── Maintenance ───────────────────────────────────────────────────
 
-    def prune_old_data(self):
-        """Delete records older than PRUNE_DAYS (trades/anomalies) and 2 days (book snapshots)."""
+    def prune_old_data(self, force_vacuum: bool = False):
+        """Delete records older than PRUNE_DAYS (trades/anomalies) and 1 day (book snapshots).
+
+        Also prunes stale market_profiles and skipped_trades.
+        Runs incremental VACUUM every ~6 hours (or when force_vacuum=True) to
+        reclaim disk space and prevent mmap bloat in the systemd cgroup.
+        """
         cutoff = time.time() - PRUNE_DAYS * 86400
-        book_cutoff = time.time() - 2 * 86400  # Book snapshots only need 2 days
+        book_cutoff = time.time() - 86400          # Book snapshots: 1 day
+        profile_cutoff = time.time() - 3 * 86400   # Market profiles: 3 days
+        skip_cutoff = time.time() - 7 * 86400      # Skipped trades: 7 days
         c1 = self._conn.execute("DELETE FROM trades WHERE ts < ?", (cutoff,)).rowcount
         c2 = self._conn.execute("DELETE FROM anomalies WHERE ts < ?", (cutoff,)).rowcount
         c3 = self._conn.execute("DELETE FROM book_snapshots WHERE ts < ?", (book_cutoff,)).rowcount
+        c4 = self._conn.execute("DELETE FROM market_profiles WHERE updated_at < ?", (profile_cutoff,)).rowcount
+        c5 = self._conn.execute("DELETE FROM skipped_trades WHERE ts < ?", (skip_cutoff,)).rowcount
         self._conn.commit()
-        if c1 or c2 or c3:
-            log.info(f"Pruned old data: {c1} trades, {c2} anomalies, {c3} book snapshots")
+        total_pruned = c1 + c2 + c3 + c4 + c5
+        if total_pruned:
+            log.info(f"Pruned old data: {c1} trades, {c2} anomalies, {c3} book snapshots, {c4} profiles, {c5} skipped")
+
+        # VACUUM removed — it rewrites the entire DB file and blocks the
+        # asyncio event loop for minutes on a 1-OCPU VM. Run manually when
+        # needed via: sqlite3 diamond_trades.db "VACUUM"
 
     def get_db_stats(self) -> dict:
         """Get database statistics."""

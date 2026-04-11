@@ -53,6 +53,13 @@ ENGINEERED_FEATURES = [
     # raw features, so composite*price introduces massive multicollinearity.
     # Wastes degrees of freedom and confuses feature importance attribution.
     "category_target_enc",
+    # ── Binned microstructural regime indicators (Sprint 11) ─────────
+    # Disjoint one-hot features that let Lasso capture non-linear
+    # price × side interactions without multicollinearity. These encode
+    # the three regimes where edge behaves qualitatively differently.
+    "is_longshot_yes",       # <30¢ YES — retail favorite speculation
+    "is_favorite_no",        # >70¢ NO — informed contrarian flow
+    "is_mid_yes_spike",      # 30-60¢ YES with high volume — noise apex
 ]
 
 ALL_CANDIDATE_FEATURES = RAW_FEATURES + ENGINEERED_FEATURES
@@ -94,7 +101,7 @@ class DiamondMLScorer:
         Returns:
             X: Feature DataFrame
             y: Binary labels (1=win, 0=loss)
-            meta: Metadata DataFrame (ticker, pnl_cents, entry_price, opened_at)
+            meta: Metadata DataFrame (ticker, pnl_cents, entry_price, opened_at, settled_at)
         """
         import sqlite3
 
@@ -102,11 +109,12 @@ class DiamondMLScorer:
         conn.row_factory = sqlite3.Row
         query = """
             SELECT id, ticker, side, entry_price, fill_price, pnl_cents,
-                   anomaly_score, features_json, opened_at, category
+                   anomaly_score, features_json, opened_at, settled_at, category
             FROM paper_trades
             WHERE status = 'settled'
               AND features_json IS NOT NULL
               AND pnl_cents IS NOT NULL
+              AND settled_at IS NOT NULL
             ORDER BY opened_at ASC
         """
         rows = conn.execute(query).fetchall()
@@ -118,15 +126,21 @@ class DiamondMLScorer:
         records = []
         meta_records = []
         labels = []
+        n_skipped_json = 0
 
         for row in rows:
             try:
                 feat = json.loads(row["features_json"])
             except (json.JSONDecodeError, TypeError):
+                n_skipped_json += 1
                 continue
 
-            price = row["fill_price"] or row["entry_price"] or 50
-            pnl = row["pnl_cents"] or 0.0
+            # Explicit None checks — avoid truthiness (0 is a valid price)
+            price = row["fill_price"] if row["fill_price"] is not None else row["entry_price"]
+            if price is None:
+                n_skipped_json += 1
+                continue
+            pnl = row["pnl_cents"] if row["pnl_cents"] is not None else 0.0
 
             # Raw features (fill missing with 0)
             raw = {f: float(feat.get(f, 0.0)) for f in RAW_FEATURES}
@@ -139,6 +153,14 @@ class DiamondMLScorer:
             raw["side_is_yes"] = 1.0 if row["side"] == "yes" else 0.0
             raw["category_target_enc"] = 0.0  # Filled later
 
+            # Binned microstructural regime indicators (disjoint, orthogonal)
+            raw["is_longshot_yes"] = 1.0 if (price < 30 and row["side"] == "yes") else 0.0
+            raw["is_favorite_no"] = 1.0 if (price > 70 and row["side"] == "no") else 0.0
+            raw["is_mid_yes_spike"] = 1.0 if (
+                30 <= price <= 60 and row["side"] == "yes"
+                and raw.get("volume_spike_ratio", 0) > 0.8
+            ) else 0.0
+
             records.append(raw)
             meta_records.append({
                 "id": row["id"],
@@ -146,10 +168,18 @@ class DiamondMLScorer:
                 "pnl_cents": pnl,
                 "entry_price": price,
                 "opened_at": row["opened_at"],
+                "settled_at": row["settled_at"],
                 "category": row["category"] or "unknown",
                 "anomaly_score": row["anomaly_score"],
             })
             labels.append(1.0 if pnl > 0 else 0.0)
+
+        if n_skipped_json > 0:
+            log.warning(f"[ML] Skipped {n_skipped_json}/{len(rows)} trades "
+                        f"(unparseable features_json or missing price)")
+            if n_skipped_json > len(rows) * 0.5:
+                log.error("[ML] Over 50% of trades have corrupt data. "
+                          "Possible database corruption.")
 
         X = pd.DataFrame(records)
         y = pd.Series(labels, name="is_win")
@@ -188,7 +218,8 @@ class DiamondMLScorer:
 
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
-        model = LogisticRegression(solver="saga", C=1.0, l1_ratio=1.0,
+        model = LogisticRegression(solver="saga", penalty="elasticnet",
+                                   C=1.0, l1_ratio=1.0,
                                    max_iter=2000, random_state=42)
         model.fit(X_scaled, y)
         real_importance = np.abs(model.coef_[0])
@@ -198,7 +229,8 @@ class DiamondMLScorer:
         for i in range(n_iterations):
             y_shuffled = y.values.copy()
             rng.shuffle(y_shuffled)
-            model_null = LogisticRegression(solver="saga", C=1.0, l1_ratio=1.0,
+            model_null = LogisticRegression(solver="saga", penalty="elasticnet",
+                                           C=1.0, l1_ratio=1.0,
                                            max_iter=2000, random_state=i)
             model_null.fit(X_scaled, y_shuffled)
             null_importances[i] = np.abs(model_null.coef_[0])
@@ -223,86 +255,145 @@ class DiamondMLScorer:
 
     # ── Time-Series Cross-Validation ──────────────────────────────────
 
-    def _time_series_cv(self, X: np.ndarray, y: np.ndarray,
-                        model, n_min_train: int = 100,
-                        fold_size: int = 30, *,
-                        categories=None,
-                        cat_enc_col_idx=None,
-                        scale_per_fold: bool = False) -> dict:
-        """Expanding-window time-series CV.
+    def _time_series_cv(self, X: pd.DataFrame, y: pd.Series,
+                        meta: pd.DataFrame,
+                        model_factory: callable,
+                        n_min_train: int = 100,
+                        fold_size: int = 30) -> dict:
+        """Expanding-window CV with Point-in-Time purging and nested feature selection.
 
-        Returns mean Brier, AUC, AND per-sample held-out predictions
-        (critical: these are the ONLY valid predictions for comparison).
+        Fixes three critical look-ahead biases identified in peer review:
+        1. PiT Purging: Only trains on trades that settled BEFORE the test fold
+           opens, preventing future label leakage from overlapping contracts.
+        2. Nested Null Importance: Feature selection runs inside each fold using
+           only purged training data, preventing data snooping.
+        3. Nested Target Encoding: Category encoding computed per-fold from
+           purged training labels only.
+        4. Nested Scaling: StandardScaler fit per-fold on training data only.
 
-        If categories and cat_enc_col_idx are provided, the category target
-        encoding is recomputed per-fold using ONLY training labels to prevent
-        test-label leakage (CRO fix: peer review item #4).
-
-        If scale_per_fold=True, StandardScaler is fit on training fold only
-        and applied to test fold each iteration (prevents feature distribution
-        leakage from test data into training standardization).
+        Returns mean Brier, AUC, and per-sample held-out predictions.
         """
         n = len(y)
         briers, aucs = [], []
-        # Store held-out predictions indexed by original position
         oos_probs = np.full(n, np.nan)
-        fold = 0
+        fold_features_log = []  # Track feature stability across folds
+        folds_attempted = 0
+        folds_completed = 0
 
         start = n_min_train
         while start + fold_size <= n:
             end = min(start + fold_size, n)
-            X_train, y_train = X[:start].copy(), y[:start]
-            X_test, y_test = X[start:end].copy(), y[start:end]
+            folds_attempted += 1
 
-            # Per-fold category target encoding (prevents label leakage)
-            if categories is not None and cat_enc_col_idx is not None:
-                cats_train = categories.iloc[:start]
-                cats_test = categories.iloc[start:end]
-                fold_wr = y_train.mean() if len(y_train) > 0 else 0.5
-                smoothing = 10.0
-                fold_enc = {}
-                for cat in cats_train.unique():
-                    mask = cats_train == cat
-                    n_cat = mask.sum()
-                    wins = y_train[mask.values].sum()
-                    fold_enc[cat] = (wins + fold_wr * smoothing) / (n_cat + smoothing)
-                # Apply fold-local encoding
-                X_train[:, cat_enc_col_idx] = cats_train.map(
+            # ── 1. POINT-IN-TIME PURGE ──────────────────────────────
+            # Only keep training samples whose outcome was known (settled)
+            # strictly before the first trade in the test fold opened.
+            test_start_time = meta.iloc[start]["opened_at"]
+            pit_mask = meta.iloc[:start]["settled_at"] < test_start_time
+
+            if pit_mask.sum() < 50:
+                log.debug(f"[ML] Fold {folds_attempted}: insufficient resolved "
+                          f"trades after purge ({pit_mask.sum()}/50). Skipping.")
+                start = end
+                continue
+
+            # Use positional indexing with np.where to prevent silent index
+            # misalignment if DataFrames ever have non-default indices.
+            pit_positions = np.where(pit_mask.values)[0]
+            X_train = X.iloc[pit_positions].copy()
+            y_train = y.iloc[pit_positions].copy()
+            X_test = X.iloc[start:end].copy()
+            y_test = y.iloc[start:end].copy()
+            cats_train = meta.iloc[pit_positions]["category"]
+            cats_test = meta.iloc[start:end]["category"]
+
+            # Skip folds with homogeneous labels (all wins or all losses
+            # after PiT purge) — Lasso coefficients would be all zeros,
+            # making null importance test meaningless.
+            if len(y_train.unique()) < 2:
+                log.debug(f"[ML] Fold {folds_attempted}: homogeneous labels "
+                          f"after PiT purge ({y_train.mean():.0%} win rate). "
+                          f"Skipping.")
+                start = end
+                continue
+
+            # ── 2. NESTED TARGET ENCODING ───────────────────────────
+            # Point-in-time win rate for unseen categories (fixes Medium #4)
+            fold_wr = y_train.mean() if len(y_train) > 0 else 0.5
+            smoothing = 10.0
+            fold_enc = {}
+            for cat in cats_train.unique():
+                cat_mask = cats_train == cat
+                wins = y_train[cat_mask.values].sum()
+                fold_enc[cat] = (wins + fold_wr * smoothing) / (cat_mask.sum() + smoothing)
+
+            if "category_target_enc" in X_train.columns:
+                X_train["category_target_enc"] = cats_train.map(
                     lambda c, fe=fold_enc, fw=fold_wr: fe.get(c, fw)
                 ).values
-                X_test[:, cat_enc_col_idx] = cats_test.map(
+                X_test["category_target_enc"] = cats_test.map(
                     lambda c, fe=fold_enc, fw=fold_wr: fe.get(c, fw)
                 ).values
 
-            # Per-fold scaling: fit on train, transform both
-            if scale_per_fold:
-                fold_scaler = StandardScaler()
-                X_train = fold_scaler.fit_transform(X_train)
-                X_test = fold_scaler.transform(X_test)
+            # ── 3. NESTED NULL IMPORTANCE ───────────────────────────
+            # Feature selection using only purged training data
+            keep_features = self.null_importance_test(X_train, y_train,
+                                                      n_iterations=50)
+            fold_features_log.append(set(keep_features))
+            X_train_filtered = X_train[keep_features].values
+            X_test_filtered = X_test[keep_features].values
 
+            # ── 4. NESTED SCALING ───────────────────────────────────
+            fold_scaler = StandardScaler()
+            X_train_scaled = fold_scaler.fit_transform(X_train_filtered)
+            X_test_scaled = fold_scaler.transform(X_test_filtered)
+
+            # ── 5. MODEL FIT ────────────────────────────────────────
             try:
-                from sklearn.base import clone
-                m = clone(model)
-                m.fit(X_train, y_train)
-                proba = m.predict_proba(X_test)[:, 1]
-                # Store held-out predictions at their original indices
+                m = model_factory()
+                m.fit(X_train_scaled, y_train.values)
+                proba = m.predict_proba(X_test_scaled)[:, 1]
                 oos_probs[start:end] = proba
                 briers.append(brier_score_loss(y_test, proba))
                 if len(np.unique(y_test)) > 1:
                     aucs.append(roc_auc_score(y_test, proba))
-                fold += 1
-            except Exception as e:
-                log.warning(f"[ML] CV fold {fold} failed: {e}")
+                folds_completed += 1
+            except (ValueError, np.linalg.LinAlgError) as e:
+                log.warning(f"[ML] CV fold {folds_attempted} failed: {e}")
 
             start = end
+
+        # Log feature stability across folds via Jaccard similarity
+        # (quant review, March 2026). Jaccard < 0.50 for 3 consecutive days
+        # = halt shadow model and review data feed.
+        jaccard = 0.0
+        if len(fold_features_log) >= 2:
+            all_sets = fold_features_log
+            intersection = set.intersection(*all_sets)
+            union = set.union(*all_sets)
+            jaccard = len(intersection) / len(union) if union else 0.0
+            log.info(f"[ML] Feature Jaccard stability across {len(all_sets)} folds: "
+                     f"{jaccard:.2f} ({len(intersection)}/{len(union)} features "
+                     f"selected in all folds)")
+            if jaccard < 0.5:
+                log.warning("[ML] Low feature stability (Jaccard < 0.50) — signals may be "
+                            "statistical mirages. Review per-fold feature logs.")
+
+        if folds_completed == 0:
+            log.error(f"[ML] CV completed with ZERO valid folds out of "
+                      f"{folds_attempted} attempted. PiT purge may be too "
+                      f"aggressive or all folds raised exceptions.")
 
         return {
             "brier_mean": np.mean(briers) if briers else 1.0,
             "brier_std": np.std(briers) if briers else 0.0,
             "auc_mean": np.mean(aucs) if aucs else 0.5,
             "auc_std": np.std(aucs) if aucs else 0.0,
-            "n_folds": len(briers),
-            "oos_probs": oos_probs,  # NaN for training-only samples
+            "n_folds": folds_completed,
+            "n_folds_attempted": folds_attempted,
+            "oos_probs": oos_probs,
+            "jaccard_stability": jaccard,
+            "fold_features": fold_features_log,
         }
 
     # ── Training ──────────────────────────────────────────────────────
@@ -311,7 +402,7 @@ class DiamondMLScorer:
         """Train tiered model pipeline.
 
         Returns metrics dict with model_type, brier, auc, feature_importance, etc.
-        All comparison metrics use ONLY held-out CV predictions.
+        All comparison metrics use ONLY held-out CV predictions with PiT purging.
         """
         X, y, meta = self.extract_training_data()
 
@@ -323,88 +414,85 @@ class DiamondMLScorer:
         log.info(f"[ML] Training on {len(y)} samples "
                  f"(win rate: {y.mean():.1%})")
 
-        # Step 1: Null importance test → feature selection
-        keep_features = self.null_importance_test(X, y)
-        X_filtered = X[keep_features].copy()
+        # Step 1: Model factories (CV handles feature selection internally)
+        # Elastic Net (L1 + L2): sparsity with correlated feature stability.
+        # l1_ratio=0.7 (not 1.0 pure Lasso): shares weight among correlated
+        # features instead of arbitrarily zeroing one, improving day-to-day
+        # model stability (Jaccard > 0.70 target). Quant review (March 2026).
+        def lasso_factory():
+            return LogisticRegression(
+                solver="saga", penalty="elasticnet", C=0.5, l1_ratio=0.7,
+                max_iter=3000, random_state=42, class_weight="balanced",
+            )
 
-        # Step 2: Prepare unscaled features for per-fold CV
-        # Scaling is done per-fold inside _time_series_cv to prevent
-        # feature distribution leakage from test folds into training.
-        # A global scaler is still fit on all data for the FINAL model only.
-        X_unscaled = X_filtered.values
-
-        # Locate category_target_enc column index for per-fold re-encoding
-        _cat_col_idx = None
-        _cats = None
-        if "category_target_enc" in keep_features:
-            _cat_col_idx = list(keep_features).index("category_target_enc")
-            _cats = meta["category"]
-
-        # Step 3: Tier 1 — Lasso Logistic Regression
-        lasso = LogisticRegression(
-            solver="saga", C=0.5, l1_ratio=1.0,
-            max_iter=3000, random_state=42, class_weight="balanced",
-        )
-        lasso_cv = self._time_series_cv(X_unscaled, y.values, lasso,
-                                        categories=_cats,
-                                        cat_enc_col_idx=_cat_col_idx,
-                                        scale_per_fold=True)
-        log.info(f"[ML] Lasso CV: Brier={lasso_cv['brier_mean']:.4f}±{lasso_cv['brier_std']:.4f}, "
-                 f"AUC={lasso_cv['auc_mean']:.3f}±{lasso_cv['auc_std']:.3f}")
-
-        # Step 4: Tier 2 — GradientBoosting (only if enough data)
-        # Raised from 150 to 1000: GBM with depth-3 trees and 80 estimators has
-        # thousands of effective parameters. At < 1000 samples you're curve-fitting
-        # noise. Lasso is the only defensible model until sufficient data accumulates.
-        gb_cv = {"brier_mean": 1.0, "auc_mean": 0.5, "oos_probs": np.full(len(y), np.nan)}
-        if len(y) >= 1000:
-            gb = GradientBoostingClassifier(
+        def gbm_factory():
+            return GradientBoostingClassifier(
                 n_estimators=80, max_depth=3, learning_rate=0.05,
                 min_samples_leaf=10, subsample=0.8, max_features=0.8,
                 random_state=42,
             )
-            gb_cv = self._time_series_cv(X_unscaled, y.values, gb,
-                                        categories=_cats,
-                                        cat_enc_col_idx=_cat_col_idx,
-                                        scale_per_fold=True)
-            log.info(f"[ML] GBM CV:   Brier={gb_cv['brier_mean']:.4f}±{gb_cv['brier_std']:.4f}, "
-                     f"AUC={gb_cv['auc_mean']:.3f}±{gb_cv['auc_std']:.3f}")
 
-        # Step 5: Pick winner by Brier Score
+        # Step 2: Tier 1 — Lasso (PiT-purged CV with nested feature selection)
+        lasso_cv = self._time_series_cv(X, y, meta, lasso_factory)
+        log.info(f"[ML] Lasso CV: Brier={lasso_cv['brier_mean']:.4f}±{lasso_cv['brier_std']:.4f}, "
+                 f"AUC={lasso_cv['auc_mean']:.3f}±{lasso_cv['auc_std']:.3f} "
+                 f"({lasso_cv['n_folds']}/{lasso_cv.get('n_folds_attempted', '?')} folds)")
+
+        # Refuse to proceed if CV produced zero valid folds
+        if lasso_cv["n_folds"] == 0:
+            msg = (f"CV completed with zero valid folds "
+                   f"({lasso_cv.get('n_folds_attempted', 0)} attempted). "
+                   f"PiT purge may be too aggressive for N={len(y)}.")
+            log.error(f"[ML] {msg}")
+            return {"error": msg, "n_samples": len(y)}
+
+        # Step 3: Tier 2 — GradientBoosting (only if enough data)
+        gb_cv = {"brier_mean": 1.0, "auc_mean": 0.5, "n_folds": 0,
+                 "oos_probs": np.full(len(y), np.nan)}
+        if len(y) >= 1000:
+            gb_cv = self._time_series_cv(X, y, meta, gbm_factory)
+            log.info(f"[ML] GBM CV:   Brier={gb_cv['brier_mean']:.4f}±{gb_cv['brier_std']:.4f}, "
+                     f"AUC={gb_cv['auc_mean']:.3f}±{gb_cv['auc_std']:.3f} "
+                     f"({gb_cv['n_folds']}/{gb_cv.get('n_folds_attempted', '?')} folds)")
+
+        # Step 4: Pick winner by Brier Score
         if gb_cv["brier_mean"] < lasso_cv["brier_mean"] - 0.005:
             log.info("[ML] Winner: GradientBoosting (lower Brier)")
-            base_model = GradientBoostingClassifier(
-                n_estimators=80, max_depth=3, learning_rate=0.05,
-                min_samples_leaf=10, subsample=0.8, max_features=0.8,
-                random_state=42,
-            )
+            base_model = gbm_factory()
             winner_cv = gb_cv
             model_type = "gradient_boosting"
         else:
             log.info("[ML] Winner: Lasso (GBM didn't beat it)")
-            base_model = LogisticRegression(
-                solver="saga", C=0.5, l1_ratio=1.0,
-                max_iter=3000, random_state=42, class_weight="balanced",
-            )
+            base_model = lasso_factory()
             winner_cv = lasso_cv
             model_type = "lasso"
+
+        # Step 5: Final feature selection on all data (for production model)
+        # Apply global category encoding BEFORE feature selection so the
+        # null importance test evaluates real per-category values, not
+        # the constant placeholder (which would always be dropped as zero-variance).
+        X_for_selection = X.copy()
+        if "category_target_enc" in X_for_selection.columns:
+            X_for_selection["category_target_enc"] = meta["category"].map(
+                lambda c: self._category_encoding.get(c, self._global_win_rate)
+            )
+        keep_features = self.null_importance_test(X_for_selection, y)
+        X_filtered = X_for_selection[keep_features].copy()
 
         # Step 6: Train final model on all data
         # Global scaler fit on ALL data is correct here — this is the production
         # model, not CV evaluation. Per-fold scaling above was for unbiased metrics.
         scaler = StandardScaler()
-        # Apply global category encoding for the final model
-        X_final = X_filtered.copy()
-        X_final["category_target_enc"] = meta["category"].map(
-            lambda c: self._category_encoding.get(c, self._global_win_rate)
-        ) if "category_target_enc" in X_final.columns else X_final.get("category_target_enc")
-        X_scaled = scaler.fit_transform(X_final)
+        X_scaled = scaler.fit_transform(X_filtered)
 
-        # NO Platt scaling at N < 500 — probabilities are ordinal, not cardinal
+        # Platt scaling with TimeSeriesSplit (fixes Critical #3: no random shuffle)
         if len(y) >= MIN_N_FOR_CALIBRATION:
             from sklearn.calibration import CalibratedClassifierCV
-            final_model = CalibratedClassifierCV(base_model, method="sigmoid", cv=3)
-            log.info(f"[ML] N={len(y)} >= {MIN_N_FOR_CALIBRATION}: applying Platt calibration")
+            from sklearn.model_selection import TimeSeriesSplit
+            tscv = TimeSeriesSplit(n_splits=5)
+            final_model = CalibratedClassifierCV(base_model, method="sigmoid", cv=tscv)
+            log.info(f"[ML] N={len(y)} >= {MIN_N_FOR_CALIBRATION}: applying "
+                     f"Time-Series Platt calibration (5 splits)")
         else:
             final_model = base_model
             log.info(f"[ML] N={len(y)} < {MIN_N_FOR_CALIBRATION}: using raw probabilities "
@@ -449,8 +537,8 @@ class DiamondMLScorer:
         # OOS edge>0 stats (the ONLY valid comparison)
         oos_edge_pos = oos_mask & (oos_edges > 0)
         oos_n = int(oos_edge_pos.sum())
-        oos_wins = int(y[oos_edge_pos].sum()) if oos_n > 0 else 0
-        oos_pnl = float(meta.loc[oos_edge_pos, "pnl_cents"].sum()) if oos_n > 0 else 0.0
+        oos_wins = int(y.values[oos_edge_pos].sum()) if oos_n > 0 else 0
+        oos_pnl = float(meta["pnl_cents"].values[oos_edge_pos].sum()) if oos_n > 0 else 0.0
         oos_wr = oos_wins / oos_n if oos_n > 0 else 0.0
         oos_wr_lo, oos_wr_hi = _wilson_ci(oos_wins, oos_n)
 
@@ -474,6 +562,9 @@ class DiamondMLScorer:
             "gbm_brier": gb_cv["brier_mean"],
             "n_folds": winner_cv["n_folds"],
             "trained_at": self._trained_at,
+            # Structural stability (quant review, March 2026)
+            "jaccard_stability": winner_cv.get("jaccard_stability", 0.0),
+            "l1_ratio": 0.7,  # Elastic Net balance (0=Ridge, 1=Lasso)
             # OOS-only edge metrics (fixes CRO flaw #1)
             "oos_edge_trades": oos_n,
             "oos_edge_wins": oos_wins,
@@ -499,7 +590,8 @@ class DiamondMLScorer:
 
     # ── Prediction ────────────────────────────────────────────────────
 
-    def predict(self, features: dict, entry_price: int) -> float:
+    def predict(self, features: dict, entry_price: int,
+                taker_side: str = "") -> float:
         """Predict trade edge = P(win) - market_implied_probability.
 
         NOTE: At N < 500, probabilities are NOT calibrated (Platt scaling disabled).
@@ -509,11 +601,12 @@ class DiamondMLScorer:
         Args:
             features: Feature dict from FeatureEngine.compute()
             entry_price: Entry price in cents (1-99)
+            taker_side: "yes" or "no" — for side_is_yes feature (default "" → 0.5)
 
         Returns:
             Edge score (positive = favorable). -999 if model not ready.
         """
-        if self._model is None or self._scaler is None:
+        if not self.is_ready:
             return -999.0
 
         try:
@@ -531,9 +624,22 @@ class DiamondMLScorer:
                 elif fname == "entry_price_cents":
                     raw[fname] = float(entry_price)
                 elif fname == "side_is_yes":
-                    raw[fname] = 0.5
+                    if taker_side:
+                        raw[fname] = 1.0 if taker_side == "yes" else 0.0
+                    else:
+                        raw[fname] = 0.5  # Fallback if side unknown
                 elif fname == "category_target_enc":
                     raw[fname] = self._global_win_rate
+                elif fname == "is_longshot_yes":
+                    is_yes = taker_side == "yes" if taker_side else False
+                    raw[fname] = 1.0 if (entry_price < 30 and is_yes) else 0.0
+                elif fname == "is_favorite_no":
+                    is_no = taker_side == "no" if taker_side else False
+                    raw[fname] = 1.0 if (entry_price > 70 and is_no) else 0.0
+                elif fname == "is_mid_yes_spike":
+                    is_yes = taker_side == "yes" if taker_side else False
+                    vol_spike = float(features.get("volume_spike_ratio", 0))
+                    raw[fname] = 1.0 if (30 <= entry_price <= 60 and is_yes and vol_spike > 0.8) else 0.0
                 else:
                     raw[fname] = 0.0
 
@@ -547,7 +653,7 @@ class DiamondMLScorer:
             return float(edge)
 
         except Exception as e:
-            log.error(f"[ML] Prediction failed: {e}")
+            log.error(f"[ML] Prediction failed: {e}", exc_info=True)
             return -999.0
 
     # ── Comparison (OOS-only — fixes CRO flaw #1) ────────────────────
@@ -555,9 +661,9 @@ class DiamondMLScorer:
     def compare_with_handtuned(self) -> dict:
         """Compare ML edge scorer vs hand-tuned composite.
 
-        CRITICAL: All ML metrics use ONLY held-out CV fold predictions.
-        The final model (trained on all data) is NEVER used for comparison.
-        This prevents the in-sample bias identified in CRO review.
+        CRITICAL: All ML metrics use ONLY held-out CV fold predictions with
+        Point-in-Time purging and nested feature selection. The final model
+        (trained on all data) is NEVER used for comparison.
         """
         X, y, meta = self.extract_training_data()
         if len(y) < 50:
@@ -575,35 +681,20 @@ class DiamondMLScorer:
             results["handtuned_auc"] = float(roc_auc_score(y, ht_scores))
         results["handtuned_pnl_cents"] = float(meta["pnl_cents"].sum())
 
-        # ML: generate held-out predictions via fresh CV (NOT using saved model)
-        keep_features = self._feature_names
-        if not keep_features:
-            keep_features = self.null_importance_test(X, y)
+        # ML: re-run PiT-purged CV to get held-out predictions
+        def model_factory():
+            if self._model_type == "gradient_boosting":
+                return GradientBoostingClassifier(
+                    n_estimators=80, max_depth=3, learning_rate=0.05,
+                    min_samples_leaf=10, subsample=0.8, max_features=0.8,
+                    random_state=42,
+                )
+            return LogisticRegression(
+                solver="saga", penalty="elasticnet", C=0.5, l1_ratio=0.7,
+                max_iter=3000, random_state=42, class_weight="balanced",
+            )
 
-        X_filtered = X[keep_features]
-        X_unscaled = X_filtered.values
-
-        # Re-run CV to get held-out predictions
-        model = LogisticRegression(
-            solver="saga", C=0.5, l1_ratio=1.0,
-            max_iter=3000, random_state=42, class_weight="balanced",
-        ) if self._model_type != "gradient_boosting" else GradientBoostingClassifier(
-            n_estimators=80, max_depth=3, learning_rate=0.05,
-            min_samples_leaf=10, subsample=0.8, max_features=0.8,
-            random_state=42,
-        )
-
-        # Locate category_target_enc for per-fold re-encoding
-        _cat_col_idx = None
-        _cats = None
-        if "category_target_enc" in keep_features:
-            _cat_col_idx = list(keep_features).index("category_target_enc")
-            _cats = meta["category"]
-
-        cv_result = self._time_series_cv(X_unscaled, y.values, model,
-                                         categories=_cats,
-                                         cat_enc_col_idx=_cat_col_idx,
-                                         scale_per_fold=True)
+        cv_result = self._time_series_cv(X, y, meta, model_factory)
         oos_probs = cv_result["oos_probs"]
         oos_mask = ~np.isnan(oos_probs)
 
@@ -628,8 +719,8 @@ class DiamondMLScorer:
             mask = oos_mask & (oos_edges > threshold)
             n = int(mask.sum())
             if n > 0:
-                wins = int(y[mask].sum())
-                pnl = float(meta.loc[mask, "pnl_cents"].sum())
+                wins = int(y.values[mask].sum())
+                pnl = float(meta["pnl_cents"].values[mask].sum())
                 wr = wins / n
                 wr_lo, wr_hi = _wilson_ci(wins, n)
                 results[f"oos_edge>{threshold:.2f}"] = {
@@ -700,3 +791,79 @@ class DiamondMLScorer:
         if self._trained_at <= 0:
             return float("inf")
         return (time.time() - self._trained_at) / 3600
+
+    # ── Shadow Model Evaluation (Quant Review, March 2026) ───────────
+
+    def evaluate_shadow_model(
+        self,
+        y_true: np.ndarray,
+        y_pred_shadow: np.ndarray,
+        current_active_features: set,
+        new_shadow_features: set,
+    ) -> dict:
+        """Evaluate shadow model's calibration and structural stability.
+
+        To be run daily before manual promotion of ML_SCORER_ACTIVE.
+        Checks both predictive quality (Brier score) and structural
+        stability (Jaccard similarity of active feature set).
+
+        Quant review: tracking Brier alone is insufficient. Feature set
+        turnover is the canary for concept drift whipsawing — where a
+        temporary market anomaly causes the Elastic Net to zero out
+        historically robust features.
+
+        Args:
+            y_true: Actual outcomes (0/1 array from settled trades).
+            y_pred_shadow: Shadow model predicted probabilities.
+            current_active_features: Feature set from current production model.
+            new_shadow_features: Feature set from newly trained shadow model.
+
+        Returns:
+            Dict with brier_score, jaccard_similarity, features_dropped,
+            features_added, warnings, and promotion_eligible flag.
+        """
+        brier = brier_score_loss(y_true, y_pred_shadow)
+
+        # Jaccard similarity: measures feature set stability across retrains
+        intersection = current_active_features & new_shadow_features
+        union = current_active_features | new_shadow_features
+        jaccard = len(intersection) / len(union) if union else 0.0
+
+        features_dropped = current_active_features - new_shadow_features
+        features_added = new_shadow_features - current_active_features
+
+        warnings = []
+        if jaccard < 0.70:
+            warnings.append(
+                f"High feature turnover (Jaccard: {jaccard:.2f}). "
+                f"Model may be fitting to noise. "
+                f"Dropped: {features_dropped}, Added: {features_added}"
+            )
+        if brier > 0.25:
+            warnings.append(f"Poor calibration (Brier: {brier:.4f}).")
+
+        # Promotion gate: eligible only if both calibration and stability pass
+        promotion_eligible = brier < 0.25 and jaccard >= 0.70
+
+        for w in warnings:
+            log.warning(f"[ML-SHADOW] {w}")
+
+        if promotion_eligible:
+            log.info(
+                f"[ML-SHADOW] Model eligible for promotion: "
+                f"Brier={brier:.4f}, Jaccard={jaccard:.2f}"
+            )
+        else:
+            log.info(
+                f"[ML-SHADOW] Model NOT eligible for promotion: "
+                f"Brier={brier:.4f}, Jaccard={jaccard:.2f}"
+            )
+
+        return {
+            "brier_score": brier,
+            "jaccard_similarity": jaccard,
+            "features_dropped": features_dropped,
+            "features_added": features_added,
+            "warnings": warnings,
+            "promotion_eligible": promotion_eligible,
+        }

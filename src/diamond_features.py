@@ -215,6 +215,10 @@ def sweep_score(recent_trades: list[dict], current_side: str) -> float:
             up_levels = 1
         # Equal prices don't break the streak
 
+    # Commit final streak (may not have been captured if loop ended mid-run)
+    max_up = max(max_up, up_levels)
+    max_down = max(max_down, down_levels)
+
     sweep_levels = max(max_up, max_down)
     if sweep_levels < 2:
         return 0.0
@@ -310,6 +314,7 @@ def book_pressure_delta(
 def compute_composite_score(
     features: dict[str, float],
     price_cents: float | None = None,
+    taker_side: str = "",
 ) -> float:
     """Two-stage scoring: trigger gate → weighted discriminative score.
 
@@ -320,9 +325,8 @@ def compute_composite_score(
     Stage 2 (Score): Weighted combination of 8 discriminative features with
     redistribution from inactive to active (capped 1.5×, 1.3× if <3 features).
 
-    Probability penalty: Low-probability contracts require proportionally higher
-    raw scores. Replaces hard min-price cutoff with continuous penalty visible
-    in anomaly logging. PhD review (March 2025).
+    Price + side penalties: Convexity penalty suppresses negative-edge price
+    buckets. YES-side penalty raises the bar for retail-correlated flow.
     """
     # ── Stage 1: Trigger gate ──────────────────────────────────────
     for trigger in TRIGGER_FEATURES:
@@ -353,14 +357,27 @@ def compute_composite_score(
 
     score = raw_score * redistribution
 
-    # ── Probability-conditioned penalty ────────────────────────────
-    # Longshots require higher anomaly scores to reach ALERT.
-    # A 20c contract needs raw score 0.55 × 1.35 = 0.74 to trigger.
+    # ── Convexity price penalty ────────────────────────────────────
+    # Live data (N=441): 25-49¢ is -$13.06 / 27% WR (primary bleed source).
+    # 50-74¢ marginal (+$4.04 / 58% WR), 75¢+ expensive (-$0.63 / 81% WR).
+    # <25¢ only profitable bucket (+$1.18). Halt 25-49¢; tax the rest.
     if price_cents is not None and price_cents > 0:
-        if price_cents < 25:
-            score = score / 1.35
-        elif price_cents < 50:
-            score = score / 1.15
+        if price_cents >= 75:
+            score = score * 0.75   # Expensive losers wipe out high WR gains
+        elif price_cents >= 50:
+            score = score * 0.85   # Marginal edge — allow strong signals through
+        elif price_cents >= 25:
+            score = score * 0.50   # Near-halt — worst bucket, 27% WR, -$13 all-time
+        # <25¢: no penalty (only bucket with positive edge)
+
+    # ── YES-side retail flow penalty ────────────────────────────────
+    # Live data (N=441): 92% of recent trades are YES-side, 41% WR.
+    # Retail overwhelmingly buys YES on favorites/popular narratives.
+    # Market makers fade this flow. NO-side flow is rarer and more
+    # likely informed (e.g., aggressively lifting NO offers = smart money).
+    # Penalize YES-side to raise the bar; leave NO-side unpenalized.
+    if taker_side == "yes":
+        score = score * 0.85   # 15% penalty — YES flow is retail-correlated
 
     return _clamp(score)
 
@@ -502,7 +519,7 @@ class FeatureEngine:
         if entry_price_cents is not None:
             entry_price_cents = float(entry_price_cents)
 
-        composite = compute_composite_score(features, price_cents=entry_price_cents)
+        composite = compute_composite_score(features, price_cents=entry_price_cents, taker_side=taker_side)
         features["composite"] = composite
         features["alert_level"] = classify_alert_level(composite)
 
@@ -510,7 +527,9 @@ class FeatureEngine:
         ml_edge = -999.0
         if self._ml_scorer is not None and self._ml_scorer.is_ready:
             entry_price = trade.get("yes_price") or trade.get("no_price") or 50
-            ml_edge = self._ml_scorer.predict(features, int(entry_price))
+            ml_edge = self._ml_scorer.predict(
+                features, int(entry_price), taker_side=taker_side,
+            )
         features["ml_edge"] = ml_edge
 
         try:

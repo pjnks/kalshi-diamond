@@ -289,6 +289,11 @@ class KalshiRESTClient:
         """Cancel an open order."""
         return await self._request("DELETE", f"/portfolio/orders/{order_id}")
 
+    async def get_open_orders(self) -> list[dict]:
+        """Fetch all resting orders from Kalshi. Used for orphan sweep on startup."""
+        data = await self._request("GET", "/portfolio/orders", params={"status": "resting"})
+        return data.get("orders", [])
+
     async def get_positions(self, ticker: str | None = None) -> list[dict]:
         """Get portfolio positions. Optionally filter by ticker."""
         params: dict[str, Any] = {}

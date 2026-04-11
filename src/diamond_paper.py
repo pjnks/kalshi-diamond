@@ -12,11 +12,13 @@ Lifecycle: on_anomaly() → place order → poll_loop() checks fills + settlemen
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import time
 import uuid
 
 from diamond_config import (
+    ALERT_THRESHOLD_ALERT,
     CONVICTION_ENABLED,
     PAPER_CANCEL_SEC_ALERT,
     PAPER_CANCEL_SEC_CRITICAL,
@@ -43,20 +45,60 @@ _LEVEL_ORDER = {"NONE": 0, "LOG": 1, "NOTABLE": 2, "ALERT": 3, "CRITICAL": 4}
 class PaperTradingEngine:
     """Manages the lifecycle of auto-placed micro-bets on anomaly signals."""
 
-    def __init__(self, store, rest_client, alert_module=None, conviction_tracker=None):
+    def __init__(self, store, rest_client, alert_module=None, conviction_tracker=None,
+                 threshold_manager=None):
         """
         Args:
             store: DiamondStore instance.
             rest_client: KalshiRESTClient instance (with order methods).
             alert_module: Optional diamond_alerts module for trade notifications.
             conviction_tracker: Optional ConvictionTracker for event-aware trade management.
+            threshold_manager: Optional CategoryThresholdManager for dynamic ALERT thresholds.
         """
         self._store = store
         self._rest = rest_client
         self._alerts = alert_module
         self._conviction = conviction_tracker
+        self._threshold_mgr = threshold_manager
         self._pending_tickers: set[str] = set()  # Race condition guard
         self._lock = asyncio.Lock()
+
+    async def cancel_orphaned_orders(self):
+        """Sweep and cancel resting orders that survived a crash.
+
+        Must be called once at startup, BEFORE the WebSocket connects and
+        anomaly processing begins. This prevents stale limit orders from
+        sitting on Kalshi's book as adverse selection bait after a restart.
+        """
+        log.info("[EXECUTION] Sweeping for orphaned resting orders on Kalshi...")
+        cancelled = 0
+        try:
+            open_orders = await self._rest.get_open_orders()
+            if not open_orders:
+                log.info("[EXECUTION] No orphaned orders found on Kalshi.")
+                return
+
+            for order in open_orders:
+                order_id = order.get("order_id", "")
+                ticker = order.get("ticker", "unknown")
+                try:
+                    await self._rest.cancel_order(order_id)
+                    cancelled += 1
+                    log.info(f"[EXECUTION] Cancelled orphaned order {order_id} on {ticker}")
+
+                    # Update local DB record if we have one
+                    row = self._store._conn.execute(
+                        "SELECT id FROM paper_trades WHERE order_id = ?", (order_id,)
+                    ).fetchone()
+                    if row:
+                        self._store.update_paper_fill(row["id"], order_id, 0, 0, "unfilled")
+                except Exception as e:
+                    log.warning(f"[EXECUTION] Failed to cancel orphan {order_id}: {e}")
+
+            log.info(f"[EXECUTION] Orphan sweep complete: {cancelled}/{len(open_orders)} cancelled")
+
+        except Exception as e:
+            log.error(f"[EXECUTION] Orphan sweep failed: {e}", exc_info=True)
 
     async def on_anomaly(
         self,
@@ -76,8 +118,21 @@ class PaperTradingEngine:
         if not PAPER_TRADING_ENABLED:
             return
 
-        # Check minimum alert level
-        if _LEVEL_ORDER.get(level, 0) < _LEVEL_ORDER.get(PAPER_MIN_ALERT_LEVEL, 3):
+        # Dynamic threshold gate (replaces static _LEVEL_ORDER check)
+        # CategoryThresholdManager adjusts the ALERT threshold per (category, hour).
+        # Raw score stays clean in DB — only the entry gate moves.
+        if self._threshold_mgr is not None:
+            self._threshold_mgr.maybe_refresh()
+            utc_hour = datetime.datetime.now(datetime.timezone.utc).hour
+            entry_threshold = self._threshold_mgr.effective_threshold(category, utc_hour)
+        else:
+            entry_threshold = ALERT_THRESHOLD_ALERT  # Fallback to static config
+
+        if score < entry_threshold:
+            log.debug(
+                f"[PAPER] Skipping {ticker}: score {score:.3f} < "
+                f"threshold {entry_threshold:.3f} (category={category})"
+            )
             return
 
         # Normalize price
@@ -90,6 +145,26 @@ class PaperTradingEngine:
             self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
                                              "min_price", f"price {price_int}¢ ≤ {PAPER_MIN_PRICE_CENTS}¢")
             return
+
+        # ── YES-side mid-price structural block ──────────────────────
+        # 25-49¢ YES is the primary bleed bucket (-$13.06, 27% WR).
+        # Retail overwhelmingly buys YES on favorites/narratives; market
+        # makers widen spreads and fade this flow. Hard block at execution
+        # layer (not scoring) so anomaly engine still logs signals for
+        # shadow P&L and ML training. Only CRITICAL-level signals (≥0.85
+        # raw, extremely rare) can override.
+        if taker_side == "yes" and 25 <= price_int <= 49:
+            if score < 0.85:
+                log.debug(
+                    f"[PAPER] Skipping {ticker}: YES-side mid-price structural "
+                    f"block (score {score:.2f} < 0.85)"
+                )
+                self._store.insert_skipped_trade(
+                    ticker, title, taker_side, price_int, score, level,
+                    "mid_price_block",
+                    f"YES-side {price_int}¢ requires CRITICAL (score={score:.2f})",
+                )
+                return
 
         async with self._lock:
             # Duplicate check
@@ -196,7 +271,14 @@ class PaperTradingEngine:
                 return
 
             # Kill switch: total daily P&L (realized + unrealized) drops below -$20
-            estimated_cost = price_int * PAPER_CONTRACTS_PER_TRADE
+            # Use tiered count to match actual order size
+            if score >= 0.78:
+                est_count = 3
+            elif score >= 0.65:
+                est_count = 2
+            else:
+                est_count = PAPER_CONTRACTS_PER_TRADE
+            estimated_cost = price_int * est_count
             total_daily_pnl = stats.get("total_daily_pnl_cents", 0)
             new_daily_pnl = total_daily_pnl - estimated_cost  # Conservative: assume new trade loses cost
 
@@ -247,7 +329,13 @@ class PaperTradingEngine:
     ):
         """Place a limit order with order-book-aware pricing."""
         client_order_id = f"diamond_{ticker}_{int(time.time())}"
-        count = PAPER_CONTRACTS_PER_TRADE
+        # Tiered sizing: bet more on higher-conviction signals
+        if score >= 0.78:       # CRITICAL
+            count = 3
+        elif score >= 0.65:     # High ALERT
+            count = 2
+        else:                   # Low ALERT (0.55-0.64)
+            count = PAPER_CONTRACTS_PER_TRADE  # default 1
 
         # Compute event_id for conviction tracking
         event_id = None
@@ -423,9 +511,22 @@ class PaperTradingEngine:
         Prediction market alpha decays in seconds. A resting limit order past
         the signal's half-life is adverse selection bait — you only get filled
         when the market moves against you.
+
+        Safe against aiohttp session recycling: catches ClientError/TimeoutError
+        specifically and leaves cleanup to poll_loop. Propagates CancelledError
+        for clean shutdown.
         """
+        import aiohttp
+
         await asyncio.sleep(delay_sec)
         try:
+            # Check DB first — poll_loop may have already resolved this order
+            trade = self._store._conn.execute(
+                "SELECT status FROM paper_trades WHERE id = ?", (row_id,)
+            ).fetchone()
+            if trade and trade["status"] != "pending":
+                return
+
             order = await self._rest.get_order(order_id)
             raw_fill = (order.get("fill_count_fp")
                         or order.get("count_filled_fp")
@@ -456,8 +557,24 @@ class PaperTradingEngine:
             self._store.update_paper_fill(row_id, order_id, 0, 0, "unfilled")
             log.info(f"[PAPER] Auto-cancelled stale order: {ticker} "
                      f"(unfilled after {delay_sec}s — adverse selection prevention)")
+
+        except asyncio.CancelledError:
+            # Shutdown in progress — propagate for clean teardown.
+            # The order is orphaned; startup reconciliation will sweep it.
+            log.warning(f"[PAPER] Cancel task for {ticker} killed by shutdown. "
+                        f"Order {order_id} orphaned — will be swept on next startup.")
+            raise
+
+        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError, OSError) as e:
+            # Session recycled or network blip — do NOT swallow silently.
+            # Leave status as pending; poll_loop will clean up on next pass.
+            log.warning(f"[PAPER] Network error during auto-cancel for {ticker}: "
+                        f"{type(e).__name__}: {e}. Will retry via poll_loop.")
+
         except Exception as e:
-            log.debug(f"[PAPER] Auto-cancel error for {ticker}/{order_id}: {e}")
+            # Unexpected error — log at WARNING (not debug) so it's visible
+            log.warning(f"[PAPER] Auto-cancel unexpected error for {ticker}/{order_id}: "
+                        f"{type(e).__name__}: {e}")
 
     async def _exit_position(
         self,
@@ -465,7 +582,7 @@ class PaperTradingEngine:
         new_ticker: str = "",
         conviction_old: float = 0.0,
         conviction_new: float = 0.0,
-    ):
+    ) -> bool:
         """Exit an existing position by cancelling or selling.
 
         For pending (unfilled) orders: cancel the GTC order.
@@ -499,7 +616,7 @@ class PaperTradingEngine:
 
         if fill_count <= 0:
             log.warning(f"[CONVICTION] Cannot sell {ticker}: fill_count={fill_count}")
-            return
+            return False
 
         try:
             # Get current price estimate from recent trades
@@ -561,6 +678,8 @@ class PaperTradingEngine:
                     title=trade.get("title", ""),
                 )
 
+            return True
+
         except Exception as e:
             log.error(f"[CONVICTION] Failed to sell {ticker}: {e}", exc_info=True)
             # Don't mark as settled on failure — position stays open
@@ -572,6 +691,7 @@ class PaperTradingEngine:
                     features={"reason": "exit_failed", "error": str(e)[:200]},
                     market_title=f"EXIT FAILED: {ticker} {side} @ {sell_price}¢ — {e}",
                 )
+            return False
 
     async def check_settlements(self):
         """Check if any open positions have settled and compute P&L."""
@@ -614,6 +734,16 @@ class PaperTradingEngine:
                     self._store.update_paper_settlement(trade["id"], result, pnl)
                     log.info(f"[PAPER] Settled: {ticker} ({trade['title']}) "
                              f"side={side} result={result} pnl={pnl:+d}¢")
+
+                    # Update dynamic threshold manager with settlement outcome
+                    if self._threshold_mgr is not None:
+                        opened_at = trade.get("opened_at", 0)
+                        entry_hour = int(opened_at / 3600) % 24
+                        self._threshold_mgr.on_settlement(
+                            category=trade.get("category"),
+                            utc_hour=entry_hour,
+                            won=(pnl > 0),
+                        )
 
                     # Send notification
                     if PAPER_NOTIFY_TRADES and self._alerts:

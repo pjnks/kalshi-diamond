@@ -27,7 +27,7 @@ PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN", "")
 # sports markets. Need 3+ strong features to reach ALERT.
 ALERT_THRESHOLD_LOG = 0.25      # SQLite only
 ALERT_THRESHOLD_NOTABLE = 0.45  # macOS notification
-ALERT_THRESHOLD_ALERT = 0.55    # Pushover push + triggers trade
+ALERT_THRESHOLD_ALERT = 0.55    # Pushover push + triggers trade (reverted from 0.50 — lower threshold bled -$5.37/day)
 ALERT_THRESHOLD_CRITICAL = 0.78 # Emergency Pushover (repeat)
 
 # ── Two-Stage Feature Pipeline (PhD review, March 2025) ─────────────────
@@ -72,7 +72,7 @@ ALERT_COOLDOWN_SEC = 300        # Per-market alert cooldown (5 min)
 
 # ── Storage ───────────────────────────────────────────────────────────────
 DB_PATH = Path(__file__).parent / "diamond_trades.db"
-PRUNE_DAYS = 7                  # Auto-prune trades/anomalies older than this (was 30; feature engine only uses 24h)
+PRUNE_DAYS = 2                  # Auto-prune trades/anomalies older than this (was 7→2; feature engine only uses 24h, DB was bloating to 400MB+ causing OOM kills)
 
 # ── Dashboard ─────────────────────────────────────────────────────────────
 DASHBOARD_PORT = 8080
@@ -105,3 +105,18 @@ ML_SCORER_ENABLED = os.getenv("ML_SCORER_ENABLED", "false").lower() == "true"   
 ML_SCORER_ACTIVE = os.getenv("ML_SCORER_ACTIVE", "false").lower() == "true"     # Use ML score for trade decisions
 ML_MODEL_PATH = Path(__file__).parent / "diamond_ml_model.pkl"
 ML_MIN_SAMPLES = int(os.getenv("ML_MIN_SAMPLES", "100"))
+
+# ── Dynamic Threshold Manager (Category + Time-of-Day) ────────────
+# Adjusts ALERT entry threshold based on rolling category and hour performance.
+# Score stays clean — adjustments go into the threshold, not the score.
+CTM_ENABLED = os.getenv("CTM_ENABLED", "false").lower() == "true"
+CTM_BASE_THRESHOLD = ALERT_THRESHOLD_ALERT                        # 0.55 — start from static config
+CTM_WINDOW_N = int(os.getenv("CTM_WINDOW_N", "100"))              # Rolling window per bucket (trade count)
+CTM_MIN_N = int(os.getenv("CTM_MIN_N", "30"))                     # Cold-start floor: use base below this
+CTM_BASELINE_WIN_RATE = 0.487                                      # From live data (374 trades, 48.7% WR)
+CTM_SENSITIVITY = float(os.getenv("CTM_SENSITIVITY", "0.20"))     # 10pp edge → 0.02 threshold shift
+CTM_MAX_CAT_ADJ = float(os.getenv("CTM_MAX_CAT_ADJ", "0.08"))    # Max ±0.08 from category
+CTM_MAX_HOUR_ADJ = float(os.getenv("CTM_MAX_HOUR_ADJ", "0.06"))  # Max ±0.06 from time-of-day
+CTM_THRESHOLD_FLOOR = float(os.getenv("CTM_THRESHOLD_FLOOR", "0.40"))
+CTM_THRESHOLD_CEIL = float(os.getenv("CTM_THRESHOLD_CEIL", "0.72"))  # Below CRITICAL (0.78)
+CTM_REFRESH_INTERVAL_SEC = int(os.getenv("CTM_REFRESH_INTERVAL_SEC", "300"))  # 5 min DB reload
