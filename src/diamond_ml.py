@@ -60,6 +60,13 @@ ENGINEERED_FEATURES = [
     "is_longshot_yes",       # <30¢ YES — retail favorite speculation
     "is_favorite_no",        # >70¢ NO — informed contrarian flow
     "is_mid_yes_spike",      # 30-60¢ YES with high volume — noise apex
+    # ── Probability-conditioned interaction (Sprint 13) ───────────
+    # Continuous score × implied_prob interaction breaks the U-shape.
+    # Lets the model learn: high score + low price = genuine anomaly
+    # (profitable), high score + high price = noise about to revert
+    # (unprofitable). Lasso is linear — can't learn this without an
+    # explicit interaction term.
+    "score_x_implied_prob",
 ]
 
 ALL_CANDIDATE_FEATURES = RAW_FEATURES + ENGINEERED_FEATURES
@@ -172,6 +179,16 @@ class DiamondMLScorer:
                 30 <= price <= 60 and row["side"] == "yes"
                 and raw.get("volume_spike_ratio", 0) > 0.8
             ) else 0.0
+
+            # Probability-conditioned interaction (Sprint 13).
+            # anomaly_score is the post-penalty composite. entry_price_cents
+            # is the market's implied probability (in cents). Their product
+            # lets a linear model learn conditional slopes: a 0.65 score at
+            # 15¢ produces 0.65*0.15=0.098, while 0.65 at 85¢ produces
+            # 0.65*0.85=0.553 — the model can assign a negative coefficient
+            # to penalize the high-price regime.
+            anomaly_score = float(row["anomaly_score"] or 0.0)
+            raw["score_x_implied_prob"] = anomaly_score * (float(price) / 100.0)
 
             records.append(raw)
             meta_records.append({
@@ -591,6 +608,54 @@ class DiamondMLScorer:
             "oos_total_held_out": int(oos_mask.sum()),
         }
 
+        # ── Monotonicity validation ────────────────────────────────────
+        # Bin OOS predicted probabilities into deciles and check that
+        # actual win rate increases monotonically. If the U-shape persists
+        # after adding interaction terms, the feature space is mis-specified.
+        mono_bins = []
+        if oos_mask.sum() >= 50:
+            oos_p = oos_probs[oos_mask]
+            oos_y = y.values[oos_mask]
+            try:
+                n_bins = min(10, max(3, int(oos_mask.sum() / 15)))
+                bin_edges = np.percentile(oos_p, np.linspace(0, 100, n_bins + 1))
+                bin_edges = np.unique(bin_edges)  # deduplicate tied edges
+                for i in range(len(bin_edges) - 1):
+                    lo, hi = bin_edges[i], bin_edges[i + 1]
+                    if i == len(bin_edges) - 2:
+                        mask = (oos_p >= lo) & (oos_p <= hi)
+                    else:
+                        mask = (oos_p >= lo) & (oos_p < hi)
+                    n_bin = mask.sum()
+                    if n_bin > 0:
+                        wr_bin = oos_y[mask].mean()
+                        mono_bins.append({
+                            "range": f"[{lo:.3f},{hi:.3f})",
+                            "n": int(n_bin),
+                            "win_rate": float(wr_bin),
+                        })
+
+                # Check monotonicity: each bin's WR should be >= previous
+                wrs = [b["win_rate"] for b in mono_bins]
+                inversions = sum(1 for i in range(1, len(wrs)) if wrs[i] < wrs[i-1])
+                is_monotonic = inversions == 0
+                metrics["monotonicity_bins"] = mono_bins
+                metrics["monotonicity_inversions"] = inversions
+                metrics["is_monotonic"] = is_monotonic
+
+                log.info(f"[ML] Monotonicity check ({len(mono_bins)} bins, "
+                         f"{inversions} inversions):")
+                for b in mono_bins:
+                    log.info(f"  {b['range']:>18s}  N={b['n']:>4d}  "
+                             f"WR={b['win_rate']:.1%}")
+                if is_monotonic:
+                    log.info("[ML] ✓ Predicted probabilities are monotonic with actual WR")
+                else:
+                    log.warning(f"[ML] ✗ {inversions} monotonicity inversions — "
+                                f"U-shape may persist. Do NOT lower CRITICAL threshold.")
+            except Exception as e:
+                log.warning(f"[ML] Monotonicity check failed: {e}")
+
         log.info(f"[ML] Model saved: {model_type}, "
                  f"Brier={winner_cv['brier_mean']:.4f} "
                  f"(naive={naive_brier:.4f}, improvement={metrics['brier_improvement']:+.4f}), "
@@ -647,6 +712,13 @@ class DiamondMLScorer:
                         raw[fname] = 0.5  # Fallback if side unknown
                 elif fname == "category_target_enc":
                     raw[fname] = self._global_win_rate
+                elif fname == "score_x_implied_prob":
+                    # Interaction: composite_score × implied_probability
+                    # features["composite"] is set before predict() is called
+                    # (diamond_features.py line 523). This is the same post-penalty
+                    # anomaly_score stored in paper_trades at training time.
+                    composite = float(features.get("composite", 0.0))
+                    raw[fname] = composite * (float(entry_price) / 100.0)
                 elif fname == "is_longshot_yes":
                     is_yes = taker_side == "yes" if taker_side else False
                     raw[fname] = 1.0 if (entry_price < 30 and is_yes) else 0.0
