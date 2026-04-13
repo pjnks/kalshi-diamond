@@ -247,8 +247,13 @@ class DiamondMLScorer:
 
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
-        model = LogisticRegression(solver="saga", penalty="elasticnet",
-                                   C=1.0, l1_ratio=1.0,
+        # Sprint 13b: Pure L2 (Ridge) for null importance test.
+        # Previous L1/Elastic Net zeroed out collinear interaction terms
+        # (score_x_implied_prob) before permutation could evaluate them.
+        # L2 distributes weight across correlated features, allowing the
+        # permutation test to measure true discriminative power.
+        model = LogisticRegression(solver="lbfgs", penalty="l2",
+                                   C=1.0,
                                    max_iter=2000, random_state=42)
         model.fit(X_scaled, y)
         real_importance = np.abs(model.coef_[0])
@@ -258,8 +263,8 @@ class DiamondMLScorer:
         for i in range(n_iterations):
             y_shuffled = y.values.copy()
             rng.shuffle(y_shuffled)
-            model_null = LogisticRegression(solver="saga", penalty="elasticnet",
-                                           C=1.0, l1_ratio=1.0,
+            model_null = LogisticRegression(solver="lbfgs", penalty="l2",
+                                           C=1.0,
                                            max_iter=2000, random_state=i)
             model_null.fit(X_scaled, y_shuffled)
             null_importances[i] = np.abs(model_null.coef_[0])
@@ -449,13 +454,16 @@ class DiamondMLScorer:
                  f"(win rate: {y.mean():.1%})")
 
         # Step 1: Model factories (CV handles feature selection internally)
-        # Elastic Net (L1 + L2): sparsity with correlated feature stability.
-        # l1_ratio=0.7 (not 1.0 pure Lasso): shares weight among correlated
-        # features instead of arbitrarily zeroing one, improving day-to-day
-        # model stability (Jaccard > 0.70 target). Quant review (March 2026).
+        # Sprint 13b: Pure L2 (Ridge) regularization.
+        # Elastic Net (L1 component) was amputating the score_x_implied_prob
+        # interaction term due to collinearity with entry_price_cents. L2
+        # distributes weight proportionally across correlated features,
+        # allowing the model to learn the conditional slope that breaks
+        # the U-shape (high score + low price = genuine anomaly, high
+        # score + high price = noise). See quant audit April 12, 2026.
         def lasso_factory():
             return LogisticRegression(
-                solver="saga", penalty="elasticnet", C=0.5, l1_ratio=0.7,
+                solver="lbfgs", penalty="l2", C=0.5,
                 max_iter=3000, random_state=42, class_weight="balanced",
             )
 
@@ -598,7 +606,7 @@ class DiamondMLScorer:
             "trained_at": self._trained_at,
             # Structural stability (quant review, March 2026)
             "jaccard_stability": winner_cv.get("jaccard_stability", 0.0),
-            "l1_ratio": 0.7,  # Elastic Net balance (0=Ridge, 1=Lasso)
+            "l1_ratio": 0.0,  # Pure Ridge (L2) — Sprint 13b
             # OOS-only edge metrics (fixes CRO flaw #1)
             "oos_edge_trades": oos_n,
             "oos_edge_wins": oos_wins,
@@ -779,7 +787,7 @@ class DiamondMLScorer:
                     random_state=42,
                 )
             return LogisticRegression(
-                solver="saga", penalty="elasticnet", C=0.5, l1_ratio=0.7,
+                solver="lbfgs", penalty="l2", C=0.5,
                 max_iter=3000, random_state=42, class_weight="balanced",
             )
 
