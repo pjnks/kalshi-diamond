@@ -30,6 +30,70 @@ from sklearn.preprocessing import StandardScaler
 
 log = logging.getLogger(__name__)
 
+
+# ── Feature Orthogonalizer (Sprint 13b) ─────────────────────────────
+# Scrubs the base-rate (price) correlation out of raw features.
+# Raw features like taker_side_skew are mechanically correlated with
+# price (thin $0.05 books produce extreme skew more easily than thick
+# $0.85 books). This confound causes Ridge to squash all features when
+# predicting the residual (outcome - price). Orthogonalization removes
+# the price-correlated component, isolating pure anomaly signal.
+
+class FeatureOrthogonalizer:
+    """Regress each feature against implied_probability, keep residuals.
+
+    For each feature f_i:
+        f_i_orth = f_i - LinearRegression(price).predict(price)
+
+    The orthogonalized feature represents anomaly magnitude *independent*
+    of contract price. If sweep_score is 0.8 on a $0.05 contract and
+    0.8 on a $0.80 contract, the raw values are identical but the
+    orthogonalized values differ — the $0.80 contract's sweep is more
+    surprising (harder to achieve on a thick book).
+    """
+
+    def __init__(self):
+        self._models: dict[str, tuple[float, float]] = {}  # fname → (slope, intercept)
+
+    def fit(self, X: pd.DataFrame, price_col: str = "entry_price_cents") -> "FeatureOrthogonalizer":
+        """Fit OLS for each feature against price."""
+        from sklearn.linear_model import LinearRegression
+
+        if price_col not in X.columns:
+            log.warning(f"[ORTHO] Price column '{price_col}' not in X — skipping orthogonalization")
+            return self
+
+        prices = X[price_col].values.reshape(-1, 1)
+        feature_cols = [c for c in X.columns if c != price_col]
+
+        for col in feature_cols:
+            lr = LinearRegression()
+            lr.fit(prices, X[col].values)
+            self._models[col] = (float(lr.coef_[0]), float(lr.intercept_))
+
+        log.info(f"[ORTHO] Fitted {len(self._models)} feature→price regressions")
+        return self
+
+    def transform(self, X: pd.DataFrame, price_col: str = "entry_price_cents") -> pd.DataFrame:
+        """Replace features with their price-orthogonalized residuals."""
+        X_out = X.copy()
+
+        if price_col not in X.columns or not self._models:
+            return X_out
+
+        prices = X[price_col].values
+
+        for col, (slope, intercept) in self._models.items():
+            if col in X_out.columns:
+                expected = slope * prices + intercept
+                X_out[col] = X[col].values - expected
+
+        return X_out
+
+    def fit_transform(self, X: pd.DataFrame, price_col: str = "entry_price_cents") -> pd.DataFrame:
+        return self.fit(X, price_col).transform(X, price_col)
+
+
 # ── Raw feature names (drop dead cross_market_correlation) ────────────
 RAW_FEATURES = [
     "trade_size_zscore",
@@ -724,12 +788,21 @@ class DiamondMLScorer:
                  f"std={y_residual.std():.4f}, "
                  f"range=[{y_residual.min():+.3f}, {y_residual.max():+.3f}]")
 
+        # Step 0: Orthogonalize features against price.
+        # Raw features are mechanically correlated with price (thin books
+        # produce extreme skew/sweep). This confound causes Ridge to squash
+        # all features when predicting the residual. Orthogonalization
+        # removes the price-correlated component, isolating pure signal.
+        ortho = FeatureOrthogonalizer()
+        X_orth = ortho.fit_transform(X, price_col="entry_price_cents")
+        log.info(f"[ML-RESIDUAL] Orthogonalized {len(ortho._models)} features against price")
+
         # Null importance test — Ridge regression version for continuous target.
         # Cannot reuse null_importance_test() which uses LogisticRegression.
         from sklearn.linear_model import Ridge
         log.info("[ML-RESIDUAL] Running null importance test (50 iterations)...")
         scaler_null = StandardScaler()
-        X_scaled_null = scaler_null.fit_transform(X)
+        X_scaled_null = scaler_null.fit_transform(X_orth)
         model_real = Ridge(alpha=1.0)
         model_real.fit(X_scaled_null, y_residual)
         real_importance = np.abs(model_real.coef_)
@@ -746,7 +819,7 @@ class DiamondMLScorer:
 
         p95 = np.percentile(null_importances, 95, axis=0)
         keep_features = []
-        for j, fname in enumerate(X.columns):
+        for j, fname in enumerate(X_orth.columns):
             passed = real_importance[j] > p95[j]
             status = "KEEP" if passed else "DROP"
             log.info(f"  {fname:30s}  real={real_importance[j]:.4f}  "
@@ -759,8 +832,8 @@ class DiamondMLScorer:
             log.warning(f"[ML-RESIDUAL] {msg}")
             return {"error": msg, "n_samples": len(y_residual)}
 
-        X_filtered = X[keep_features]
-        log.info(f"[ML-RESIDUAL] Features kept: {len(keep_features)}/{len(X.columns)}: "
+        X_filtered = X_orth[keep_features]
+        log.info(f"[ML-RESIDUAL] Features kept: {len(keep_features)}/{len(X_orth.columns)}: "
                  f"{keep_features}")
 
         # Time-series CV for Ridge regression

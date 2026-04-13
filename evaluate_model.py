@@ -393,6 +393,56 @@ def print_report(
         print(f"  {f['feature']:>30s}  {f['n']:>5d}  {f['ic']:>+6.3f}  "
               f"{f['p_value']:>8.4f}  {sig_str:>5s}  {f['ci']:>20s}")
 
+    # ── Orthogonalized Feature IC ──
+    # Regress each feature against price, compute IC on the residual.
+    # This isolates the anomaly signal independent of contract price.
+    print(f"\n  ── Orthogonalized Feature IC (price-independent signal) ──")
+    print(f"  {'Feature':>30s}  {'Raw IC':>8s}  {'Orth IC':>8s}  {'Δ|IC|':>8s}  "
+          f"{'Orth Sig?':>9s}")
+    try:
+        from sklearn.linear_model import LinearRegression
+
+        skip_feats = {"composite", "alert_level", "ml_edge"}
+        all_feat_names = set()
+        for t in trades:
+            all_feat_names.update(t["features"].keys())
+        feat_names = sorted(all_feat_names - skip_feats)
+
+        residuals_target = np.array([t["win"] - t["implied_prob"] for t in trades])
+
+        for fname in feat_names:
+            vals, vprices, vresid = [], [], []
+            for t in trades:
+                v = t["features"].get(fname)
+                if v is not None and isinstance(v, (int, float)):
+                    vals.append(float(v))
+                    vprices.append(float(t["entry_price"]))
+                    vresid.append(t["win"] - t["implied_prob"])
+
+            if len(vals) < 20:
+                continue
+
+            vals_arr = np.array(vals)
+            prices_arr = np.array(vprices).reshape(-1, 1)
+            wins_arr = np.array([t["win"] for i, t in enumerate(trades)
+                                 if t["features"].get(fname) is not None
+                                 and isinstance(t["features"].get(fname), (int, float))])
+
+            # Orthogonalize: feature_orth = feature - E[feature|price]
+            lr = LinearRegression().fit(prices_arr, vals_arr)
+            vals_orth = vals_arr - lr.predict(prices_arr)
+
+            ic_raw = spearman_ic(vals_arr, wins_arr)
+            ic_orth = spearman_ic(vals_orth, np.array(vresid))
+
+            delta = abs(ic_orth["ic"]) - abs(ic_raw["ic"])
+            sig_str = "✓" if ic_orth["significant"] else "✗"
+            print(f"  {fname:>30s}  {ic_raw['ic']:>+7.3f}  {ic_orth['ic']:>+7.3f}  "
+                  f"{delta:>+7.3f}  {sig_str:>9s}")
+
+    except Exception as e:
+        print(f"  (Orthogonalization failed: {e})")
+
     # ── Verdict ──
     print(f"\n  ── VERDICT ──")
     if global_ic["significant"] and abs(global_ic["ic"]) > 0.05:
