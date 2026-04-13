@@ -678,6 +678,205 @@ class DiamondMLScorer:
 
         return metrics
 
+    # ── Target Residualization (Phase 2 — Sprint 13b) ────────────────
+
+    def train_residual(
+        self,
+        min_samples: int = 100,
+        min_opened_at: float | None = None,
+    ) -> dict:
+        """Train a Ridge regression model to predict alpha residuals.
+
+        Instead of predicting binary outcomes (Win=1, Loss=0), predicts the
+        residual: y_residual = outcome - implied_probability. This strips the
+        base rate (entry_price) of its dominant importance, forcing the model
+        to find edge in the anomaly features alone.
+
+        Positive residual = positive expected value (alpha).
+        Negative residual = negative expected value (adverse selection).
+
+        This is the Phase 2 architecture, ready to deploy if the classification
+        approach fails its monotonicity check at N=500.
+
+        Returns metrics dict compatible with train() output format.
+        """
+        from sklearn.linear_model import RidgeCV
+        from sklearn.model_selection import TimeSeriesSplit
+        from sklearn.metrics import mean_squared_error
+
+        X, y_binary, meta = self.extract_training_data(min_opened_at=min_opened_at)
+
+        if len(y_binary) < min_samples:
+            msg = f"Not enough samples ({len(y_binary)} < {min_samples})"
+            log.warning(f"[ML-RESIDUAL] {msg}")
+            return {"error": msg, "n_samples": len(y_binary)}
+
+        # Transform target: residual = outcome - implied_probability
+        # Win at 30¢ → residual = +0.70 (huge alpha)
+        # Loss at 30¢ → residual = -0.30 (expected loss)
+        # Win at 80¢ → residual = +0.20 (small alpha)
+        # Loss at 80¢ → residual = -0.80 (huge adverse selection)
+        implied_probs = meta["entry_price"].values / 100.0
+        y_residual = y_binary.values - implied_probs
+
+        log.info(f"[ML-RESIDUAL] Training on {len(y_residual)} samples")
+        log.info(f"[ML-RESIDUAL] Residual stats: mean={y_residual.mean():+.4f}, "
+                 f"std={y_residual.std():.4f}, "
+                 f"range=[{y_residual.min():+.3f}, {y_residual.max():+.3f}]")
+
+        # Null importance test — Ridge regression version for continuous target.
+        # Cannot reuse null_importance_test() which uses LogisticRegression.
+        from sklearn.linear_model import Ridge
+        log.info("[ML-RESIDUAL] Running null importance test (50 iterations)...")
+        scaler_null = StandardScaler()
+        X_scaled_null = scaler_null.fit_transform(X)
+        model_real = Ridge(alpha=1.0)
+        model_real.fit(X_scaled_null, y_residual)
+        real_importance = np.abs(model_real.coef_)
+
+        n_null_iter = 50
+        null_importances = np.zeros((n_null_iter, X.shape[1]))
+        rng = np.random.RandomState(42)
+        for i in range(n_null_iter):
+            y_shuf = y_residual.copy()
+            rng.shuffle(y_shuf)
+            m_null = Ridge(alpha=1.0)
+            m_null.fit(X_scaled_null, y_shuf)
+            null_importances[i] = np.abs(m_null.coef_)
+
+        p95 = np.percentile(null_importances, 95, axis=0)
+        keep_features = []
+        for j, fname in enumerate(X.columns):
+            passed = real_importance[j] > p95[j]
+            status = "KEEP" if passed else "DROP"
+            log.info(f"  {fname:30s}  real={real_importance[j]:.4f}  "
+                     f"null_p95={p95[j]:.4f}  → {status}")
+            if passed:
+                keep_features.append(fname)
+
+        if len(keep_features) < 1:
+            msg = "No features survived null importance test for residual model"
+            log.warning(f"[ML-RESIDUAL] {msg}")
+            return {"error": msg, "n_samples": len(y_residual)}
+
+        X_filtered = X[keep_features]
+        log.info(f"[ML-RESIDUAL] Features kept: {len(keep_features)}/{len(X.columns)}: "
+                 f"{keep_features}")
+
+        # Time-series CV for Ridge regression
+        scaler = StandardScaler()
+        tscv = TimeSeriesSplit(n_splits=5)
+        oos_preds = np.full(len(y_residual), np.nan)
+        fold_rmses = []
+
+        for fold_idx, (train_idx, test_idx) in enumerate(tscv.split(X_filtered)):
+            X_train = X_filtered.iloc[train_idx]
+            y_train = y_residual[train_idx]
+            X_test = X_filtered.iloc[test_idx]
+            y_test = y_residual[test_idx]
+
+            X_train_s = scaler.fit_transform(X_train)
+            X_test_s = scaler.transform(X_test)
+
+            model = RidgeCV(
+                alphas=np.logspace(-3, 2, 50),
+                scoring="neg_mean_squared_error",
+                cv=3,
+            )
+            model.fit(X_train_s, y_train)
+            preds = model.predict(X_test_s)
+            oos_preds[test_idx] = preds
+
+            rmse = np.sqrt(mean_squared_error(y_test, preds))
+            fold_rmses.append(rmse)
+            log.info(f"[ML-RESIDUAL] Fold {fold_idx}: RMSE={rmse:.4f}, "
+                     f"alpha={model.alpha_:.4f}, N_train={len(train_idx)}, "
+                     f"N_test={len(test_idx)}")
+
+        oos_mask = ~np.isnan(oos_preds)
+        if oos_mask.sum() < 20:
+            msg = f"Too few OOS predictions ({oos_mask.sum()}) for evaluation"
+            log.warning(f"[ML-RESIDUAL] {msg}")
+            return {"error": msg}
+
+        oos_p = oos_preds[oos_mask]
+        oos_y = y_residual[oos_mask]
+        oos_pnl = meta["pnl_cents"].values[oos_mask]
+
+        # Rank correlation: do higher predicted residuals correspond to better outcomes?
+        from scipy import stats as sp_stats
+        rho, p_val = sp_stats.spearmanr(oos_p, oos_y)
+
+        # Decile P&L: rank by predicted residual, check if top deciles profit
+        n_bins = min(5, max(3, int(oos_mask.sum() / 20)))
+        edges = np.percentile(oos_p, np.linspace(0, 100, n_bins + 1))
+        edges = np.unique(edges)
+
+        decile_results = []
+        log.info(f"[ML-RESIDUAL] OOS Residual Decile Analysis ({len(edges)-1} bins):")
+        for i in range(len(edges) - 1):
+            lo, hi = edges[i], edges[i + 1]
+            if i == len(edges) - 2:
+                mask = (oos_p >= lo) & (oos_p <= hi)
+            else:
+                mask = (oos_p >= lo) & (oos_p < hi)
+            n_bin = mask.sum()
+            if n_bin == 0:
+                continue
+            avg_residual = oos_y[mask].mean()
+            total_pnl = oos_pnl[mask].sum()
+            avg_pnl = oos_pnl[mask].mean()
+            decile_results.append({
+                "range": f"[{lo:+.3f}, {hi:+.3f})",
+                "n": int(n_bin),
+                "avg_residual": float(avg_residual),
+                "total_pnl": float(total_pnl),
+                "avg_pnl": float(avg_pnl),
+            })
+            log.info(f"  {decile_results[-1]['range']:>20s}  N={n_bin:>4d}  "
+                     f"AvgResidual={avg_residual:+.4f}  "
+                     f"ΣP&L={total_pnl:+.0f}¢  AvgP&L={avg_pnl:+.1f}¢")
+
+        # Check if top bucket has positive P&L (the critical validation)
+        top_bucket_pnl = decile_results[-1]["total_pnl"] if decile_results else 0
+        bottom_bucket_pnl = decile_results[0]["total_pnl"] if decile_results else 0
+
+        metrics = {
+            "model_type": "ridge_residual",
+            "n_samples": len(y_residual),
+            "features_kept": keep_features,
+            "n_features": len(keep_features),
+            "rmse_mean": float(np.mean(fold_rmses)),
+            "rmse_std": float(np.std(fold_rmses)),
+            "spearman_rho": float(rho),
+            "spearman_pval": float(p_val),
+            "spearman_significant": p_val < 0.05,
+            "oos_total": int(oos_mask.sum()),
+            "decile_results": decile_results,
+            "top_bucket_pnl": float(top_bucket_pnl),
+            "bottom_bucket_pnl": float(bottom_bucket_pnl),
+            "spread": float(top_bucket_pnl - bottom_bucket_pnl),
+        }
+
+        log.info(f"[ML-RESIDUAL] RMSE: {metrics['rmse_mean']:.4f} ± {metrics['rmse_std']:.4f}")
+        log.info(f"[ML-RESIDUAL] Spearman ρ={rho:+.4f} (p={p_val:.4f})")
+
+        if metrics["spearman_significant"]:
+            log.info("[ML-RESIDUAL] ✓ Predicted residuals rank-correlate with actual residuals")
+        else:
+            log.warning("[ML-RESIDUAL] ✗ Predicted residuals have NO significant "
+                        "rank correlation with actual residuals")
+
+        if top_bucket_pnl > 0 and bottom_bucket_pnl < 0:
+            log.info(f"[ML-RESIDUAL] ✓ Top bucket +{top_bucket_pnl:.0f}¢, "
+                     f"bottom bucket {bottom_bucket_pnl:.0f}¢ — "
+                     f"spread={metrics['spread']:.0f}¢")
+        else:
+            log.warning(f"[ML-RESIDUAL] ✗ Top/bottom bucket P&L not monotonic — "
+                        f"residual model lacks discriminative power")
+
+        return metrics
+
     # ── Prediction ────────────────────────────────────────────────────
 
     def predict(self, features: dict, entry_price: int,

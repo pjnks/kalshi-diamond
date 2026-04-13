@@ -177,6 +177,56 @@ def cmd_compare(scorer: DiamondMLScorer):
     print()
 
 
+def cmd_residual(scorer: DiamondMLScorer, min_opened_at: float | None = None):
+    """Train residual (alpha-only) model — Phase 2 architecture."""
+    print("\n" + "=" * 70)
+    print("  DIAMOND ML SCORER — TARGET RESIDUALIZATION (Phase 2)")
+    print("=" * 70)
+
+    if min_opened_at is not None:
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(min_opened_at, tz=timezone.utc)
+        print(f"\n  Filtering to trades opened after {dt.strftime('%Y-%m-%d %H:%M UTC')}")
+
+    metrics = scorer.train_residual(min_samples=100, min_opened_at=min_opened_at)
+
+    if "error" in metrics:
+        print(f"\n  ERROR: {metrics['error']}")
+        return
+
+    print(f"\n  Model type:       {metrics['model_type']}")
+    print(f"  Samples:          {metrics['n_samples']}")
+    print(f"  Features kept:    {metrics['n_features']}")
+
+    print(f"\n  ── Ridge Regression (RMSE, lower = better) ──")
+    print(f"  RMSE:             {metrics['rmse_mean']:.4f} ± {metrics['rmse_std']:.4f}")
+
+    print(f"\n  ── Rank Correlation (Spearman ρ) ──")
+    sig = "✓ SIG" if metrics["spearman_significant"] else "✗ not sig"
+    print(f"  ρ = {metrics['spearman_rho']:+.4f}  (p={metrics['spearman_pval']:.4f}, {sig})")
+
+    print(f"\n  ── OOS Residual Decile P&L ──")
+    print(f"  {'Decile':>20s}  {'N':>5s}  {'AvgResid':>10s}  {'ΣP&L':>8s}  {'AvgP&L':>8s}")
+    for d in metrics.get("decile_results", []):
+        print(f"  {d['range']:>20s}  {d['n']:>5d}  "
+              f"{d['avg_residual']:>+9.4f}  "
+              f"{d['total_pnl']:>+7.0f}¢  {d['avg_pnl']:>+7.1f}¢")
+
+    print(f"\n  ── VERDICT ──")
+    if metrics["spearman_significant"] and metrics["top_bucket_pnl"] > 0:
+        print(f"  ✓ Residual model has significant rank correlation AND "
+              f"top bucket profits (+{metrics['top_bucket_pnl']:.0f}¢)")
+        print(f"    → Alpha exists independent of base rate")
+    elif metrics["spearman_significant"]:
+        print(f"  ~ Significant rank correlation but top bucket P&L unclear")
+        print(f"    → Needs more data or feature engineering")
+    else:
+        print(f"  ✗ No significant rank correlation (ρ={metrics['spearman_rho']:+.4f})")
+        print(f"    → Anomaly scores do not predict edge after removing base rate")
+
+    print()
+
+
 def cmd_null_test(scorer: DiamondMLScorer):
     """Run null importance test only."""
     print("\n" + "=" * 70)
@@ -207,6 +257,9 @@ def main():
                         help="Replay trades with ML edge filter")
     parser.add_argument("--null-test", action="store_true",
                         help="Run null importance test only")
+    parser.add_argument("--residual", action="store_true",
+                        help="Train target residualization model (Phase 2). "
+                             "Predicts alpha residual instead of binary outcome.")
     parser.add_argument("--since", type=str, default=None,
                         help="Only train on trades after this date (YYYY-MM-DD). "
                              "Use to isolate post-penalty data regimes. "
@@ -228,6 +281,8 @@ def main():
 
     if args.null_test:
         cmd_null_test(scorer)
+    elif args.residual:
+        cmd_residual(scorer, min_opened_at=min_opened_at)
     elif args.compare or args.backtest:
         cmd_compare(scorer)
     else:
