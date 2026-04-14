@@ -43,39 +43,101 @@ class FeatureOrthogonalizer:
     """Regress each feature against implied_probability, keep residuals.
 
     For each feature f_i:
-        f_i_orth = f_i - LinearRegression(price).predict(price)
+        f_i_orth = f_i - LinearRegression(price).predict(price)   [only where f_i != 0]
+        f_i_orth = 0.0                                             [where f_i == 0]
 
     The orthogonalized feature represents anomaly magnitude *independent*
     of contract price. If sweep_score is 0.8 on a $0.05 contract and
     0.8 on a $0.80 contract, the raw values are identical but the
     orthogonalized values differ — the $0.80 contract's sweep is more
     surprising (harder to achieve on a thick book).
+
+    ── Sparse-Aware Masking (Sprint 13, critical) ─────────────────────
+    For zero-inflated features (flow_acceleration, event_relative_flow),
+    naively computing `f_i - (slope*price + intercept)` transforms every
+    inactive 0.0 into a deterministic NEGATIVE linear function of price.
+    That reintroduces the exact base-rate confound the orthogonalizer
+    was built to remove — the ML model would latch onto those residuals
+    to fade cheap contracts, completely masking the genuine signal on
+    the ~10% of trades where the feature actually fired.
+
+    Fix: fit OLS ONLY on active (non-zero) rows, and apply the residual
+    transform ONLY on active rows. Zeros stay as exact zeros. This
+    preserves sparsity and isolates the alpha to active activations.
+
+    Minimum active N to fit: 10. Below this, OLS is unstable, so we
+    skip orthogonalization for that feature (fallback: pass-through).
     """
 
+    # Features that must use masked orthogonalization (sparse by construction)
+    SPARSE_FEATURES = frozenset({"flow_acceleration", "event_relative_flow"})
+    # Minimum active samples required to fit a stable OLS line
+    MIN_ACTIVE_N = 10
+
     def __init__(self):
-        self._models: dict[str, tuple[float, float]] = {}  # fname → (slope, intercept)
+        # fname → {"slope", "intercept", "sparse": bool}
+        self._models: dict[str, dict] = {}
 
     def fit(self, X: pd.DataFrame, price_col: str = "entry_price_cents") -> "FeatureOrthogonalizer":
-        """Fit OLS for each feature against price."""
+        """Fit OLS for each feature against price.
+
+        Sparse features (zero-inflated) are fit on active rows only to
+        prevent the OLS line from being dragged toward zero by the
+        inactive mass. Dense features use the full dataset.
+        """
         from sklearn.linear_model import LinearRegression
 
         if price_col not in X.columns:
             log.warning(f"[ORTHO] Price column '{price_col}' not in X — skipping orthogonalization")
             return self
 
-        prices = X[price_col].values.reshape(-1, 1)
+        prices_all = X[price_col].values
         feature_cols = [c for c in X.columns if c != price_col]
+        n_sparse_fit = 0
+        n_sparse_skipped = 0
+        n_dense_fit = 0
 
         for col in feature_cols:
-            lr = LinearRegression()
-            lr.fit(prices, X[col].values)
-            self._models[col] = (float(lr.coef_[0]), float(lr.intercept_))
+            is_sparse = col in self.SPARSE_FEATURES
+            vals = X[col].values
 
-        log.info(f"[ORTHO] Fitted {len(self._models)} feature→price regressions")
+            if is_sparse:
+                active_mask = vals != 0.0
+                n_active = int(active_mask.sum())
+                if n_active < self.MIN_ACTIVE_N:
+                    # Not enough activations to fit a stable line — skip orthogonalization.
+                    # Feature will pass through unchanged (0s stay 0s, actives stay raw).
+                    self._models[col] = {"slope": 0.0, "intercept": 0.0,
+                                         "sparse": True, "skipped": True,
+                                         "n_active": n_active}
+                    n_sparse_skipped += 1
+                    continue
+
+                lr = LinearRegression()
+                lr.fit(prices_all[active_mask].reshape(-1, 1), vals[active_mask])
+                self._models[col] = {"slope": float(lr.coef_[0]),
+                                     "intercept": float(lr.intercept_),
+                                     "sparse": True, "skipped": False,
+                                     "n_active": n_active}
+                n_sparse_fit += 1
+            else:
+                lr = LinearRegression()
+                lr.fit(prices_all.reshape(-1, 1), vals)
+                self._models[col] = {"slope": float(lr.coef_[0]),
+                                     "intercept": float(lr.intercept_),
+                                     "sparse": False, "skipped": False}
+                n_dense_fit += 1
+
+        log.info(f"[ORTHO] Fitted {n_dense_fit} dense + {n_sparse_fit} sparse "
+                 f"({n_sparse_skipped} sparse skipped for insufficient N)")
         return self
 
     def transform(self, X: pd.DataFrame, price_col: str = "entry_price_cents") -> pd.DataFrame:
-        """Replace features with their price-orthogonalized residuals."""
+        """Replace features with their price-orthogonalized residuals.
+
+        For dense features: `f_orth = f - (slope*price + intercept)` everywhere.
+        For sparse features: apply residual ONLY where f != 0; zeros stay zeros.
+        """
         X_out = X.copy()
 
         if price_col not in X.columns or not self._models:
@@ -83,10 +145,31 @@ class FeatureOrthogonalizer:
 
         prices = X[price_col].values
 
-        for col, (slope, intercept) in self._models.items():
-            if col in X_out.columns:
+        for col, model in self._models.items():
+            if col not in X_out.columns:
+                continue
+            if model.get("skipped"):
+                # Pass-through: insufficient activations to orthogonalize safely
+                continue
+
+            slope = model["slope"]
+            intercept = model["intercept"]
+            vals = X[col].values
+
+            if model.get("sparse"):
+                # Active-only transform — zeros remain exact zeros
+                active_mask = vals != 0.0
+                if not active_mask.any():
+                    continue
+                expected = slope * prices[active_mask] + intercept
+                new_vals = vals.copy()
+                new_vals[active_mask] = vals[active_mask] - expected
+                # Zeros unchanged by construction (active_mask == False there)
+                X_out[col] = new_vals
+            else:
+                # Dense transform — apply everywhere
                 expected = slope * prices + intercept
-                X_out[col] = X[col].values - expected
+                X_out[col] = vals - expected
 
         return X_out
 
@@ -105,6 +188,11 @@ RAW_FEATURES = [
     "trade_velocity",
     "size_concentration",
     "book_pressure_delta",
+    # ── Intrinsically orthogonal features (Sprint 13) ──────────────
+    # Structurally price-independent by construction — no need for the
+    # FeatureOrthogonalizer to remove price confounds.
+    "flow_acceleration",       # 2nd derivative of trade velocity (transient shocks)
+    "event_relative_flow",     # disproportionate share of event's sibling flow
 ]
 
 # ── Engineered feature names ─────────────────────────────────────────

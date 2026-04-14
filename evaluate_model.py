@@ -443,6 +443,92 @@ def print_report(
     except Exception as e:
         print(f"  (Orthogonalization failed: {e})")
 
+    # ── Sparse Orthogonal Feature Evaluation (Sprint 13) ──
+    # flow_acceleration and event_relative_flow are zero-inflated.
+    # Global IC dilutes them. Compute conditional IC on non-zero activations only.
+    SPARSE_FEATURES = ["flow_acceleration", "event_relative_flow"]
+    sparse_feature_found = False
+    for sf_name in SPARSE_FEATURES:
+        # Check if any trades have this feature
+        sf_vals = [float(t["features"].get(sf_name, 0.0)) for t in trades]
+        n_active = sum(1 for v in sf_vals if v > 0.0)
+        if n_active == 0:
+            continue
+
+        if not sparse_feature_found:
+            print(f"\n  ── Sparse Orthogonal Feature Evaluation ──")
+            print(f"  (Conditional IC on non-zero activations only)")
+            sparse_feature_found = True
+
+        n_total = len(trades)
+        activation_rate = n_active / n_total if n_total > 0 else 0
+
+        print(f"\n  Feature: {sf_name}")
+        print(f"    Activation rate: {activation_rate:.1%} ({n_active}/{n_total})")
+
+        if n_active < 30:
+            print(f"    ⚠ Insufficient active samples ({n_active} < 30) — "
+                  f"need ~{max(30 - n_active, 0)} more non-zero trades")
+            # Still show raw stats if we have any data
+            if n_active >= 5:
+                active_trades = [t for t in trades if float(t["features"].get(sf_name, 0.0)) > 0.0]
+                active_wins = np.array([t["win"] for t in active_trades])
+                active_pnl = np.array([t["pnl_cents"] for t in active_trades])
+                print(f"    Preliminary:  N={n_active}, WR={active_wins.mean():.1%}, "
+                      f"P&L={active_pnl.sum():+.0f}¢")
+            continue
+
+        # Build arrays for active-only trades
+        active_trades = [t for t in trades if float(t["features"].get(sf_name, 0.0)) > 0.0]
+        active_vals = np.array([float(t["features"][sf_name]) for t in active_trades])
+        active_wins = np.array([t["win"] for t in active_trades])
+        active_prices = np.array([float(t["entry_price"]) for t in active_trades])
+        active_residuals = np.array([t["win"] - t["implied_prob"] for t in active_trades])
+        active_pnl = np.array([t["pnl_cents"] for t in active_trades])
+
+        # 1. Base-rate confound check: correlation with price
+        price_corr, price_p = stats.spearmanr(active_vals, active_prices)
+        confound_flag = "⚠ ENTANGLED" if abs(price_corr) > 0.30 else "✓ orthogonal"
+        print(f"    Price correlation:  {price_corr:+.3f} (p={price_p:.4f}) → {confound_flag}")
+
+        # 2. Conditional Rank IC (against binary win)
+        cond_ic = spearman_ic(active_vals, active_wins)
+        sig_str = "✓ SIG" if cond_ic["significant"] else "✗ not sig"
+        print(f"    Conditional IC:    {cond_ic['ic']:+.4f} (p={cond_ic['p_value']:.4f}) → {sig_str}")
+        print(f"    95% CI:            [{cond_ic['ci_lower']:+.4f}, {cond_ic['ci_upper']:+.4f}]")
+
+        # 3. Residual IC (against outcome - implied_prob)
+        resid_ic = spearman_ic(active_vals, active_residuals)
+        sig_str = "✓ SIG" if resid_ic["significant"] else "✗ not sig"
+        print(f"    Residual IC:       {resid_ic['ic']:+.4f} (p={resid_ic['p_value']:.4f}) → {sig_str}")
+
+        # 4. P&L summary
+        print(f"    P&L (active):      {active_pnl.sum():+.0f}¢ ({n_active} trades, "
+              f"WR={active_wins.mean():.1%})")
+
+        # 5. Top quintile edge (if enough data)
+        if n_active >= 50:
+            q80 = np.quantile(active_vals, 0.80)
+            top_mask = active_vals >= q80
+            top_residuals = active_residuals[top_mask]
+            top_pnl = active_pnl[top_mask]
+            top_n = top_mask.sum()
+            print(f"    Top 20% edge:      avg_residual={top_residuals.mean():+.4f}, "
+                  f"P&L={top_pnl.sum():+.0f}¢ ({top_n} trades)")
+
+        # 6. Kill condition check
+        kill = False
+        if abs(price_corr) > 0.30:
+            print(f"    ✗ KILL: Price correlation |{price_corr:.3f}| > 0.30 — "
+                  f"feature is base-rate entangled")
+            kill = True
+        if n_active >= 50 and abs(cond_ic["ic"]) < 0.05:
+            print(f"    ✗ KILL: Conditional IC |{cond_ic['ic']:.4f}| < 0.05 at N={n_active} — "
+                  f"no signal when active")
+            kill = True
+        if not kill and cond_ic["significant"]:
+            print(f"    ✓ PASS: Feature shows conditional signal independent of price")
+
     # ── Verdict ──
     print(f"\n  ── VERDICT ──")
     if global_ic["significant"] and abs(global_ic["ic"]) > 0.05:

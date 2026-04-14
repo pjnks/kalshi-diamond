@@ -658,6 +658,24 @@ class DiamondStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_event_sibling_volumes(self, event_prefix: str) -> list[dict]:
+        """Get volume stats for all tickers sharing an event prefix.
+
+        Used for event-relative conviction delta: this ticker's share of
+        event-level anomaly activity.
+
+        Returns [{ticker, volume_24h, trade_count_24h, updated_at}].
+        The updated_at field lets the caller enforce staleness guards —
+        out-of-order WebSocket delivery can leave a sibling's denominator
+        unrefreshed, artificially inflating the triggering ticker's share.
+        """
+        rows = self._conn.execute(
+            "SELECT ticker, volume_24h, trade_count_24h, updated_at "
+            "FROM market_profiles WHERE ticker LIKE ? || '%'",
+            (event_prefix,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def count_open_positions_by_category(self, category: str) -> int:
         """Count open positions in a specific market category."""
         row = self._conn.execute(

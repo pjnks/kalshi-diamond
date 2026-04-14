@@ -59,6 +59,10 @@ FEATURE_WEIGHTS.update(SCORER_WEIGHTS)
 
 # Per-feature enable/disable toggles
 FEATURE_ENABLED = {name: True for name in FEATURE_WEIGHTS}
+# Orthogonal features (Sprint 13): ML-only, not in composite score weights.
+# Structurally price-independent by construction (acceleration + relative flow).
+FEATURE_ENABLED["flow_acceleration"] = True
+FEATURE_ENABLED["event_relative_flow"] = True
 
 # ── Rolling Windows ──────────────────────────────────────────────────────
 ROLLING_WINDOW_1H = 3600

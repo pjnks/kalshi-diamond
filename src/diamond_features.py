@@ -308,6 +308,107 @@ def book_pressure_delta(
     return _clamp(score)
 
 
+# ── Intrinsically Orthogonal Features (Sprint 13b) ───────────────────
+# These features are designed to be structurally price-independent:
+# they measure *relative* or *derivative* quantities that don't scale
+# with order book depth or contract price.
+
+
+def flow_acceleration(
+    recent_trades: list[dict],
+    now: float | None = None,
+) -> float:
+    """
+    Feature 11: Is trade velocity ACCELERATING or decelerating?
+
+    The second derivative of flow — isolates the exact moment informed
+    liquidity enters the book. Level (volume) correlates with price.
+    Velocity (trades/min) correlates with price. But ACCELERATION
+    (change in velocity) captures transient microstructure shocks
+    regardless of absolute book depth.
+
+    Computes velocity in [T-31s, T-1s] vs [T-61s, T-31s].
+    The 1-second exclusion window prevents temporal leakage: the
+    triggering trade itself (at time T) must NOT be counted in the
+    velocity measurement, otherwise the feature becomes self-referential
+    (trade causes scoring AND inflates the score).
+    """
+    if now is None:
+        now = time.time()
+
+    # Exclude the most recent 1s to prevent self-referential leakage.
+    # The trade that triggered this scoring happened at ~T, so we measure
+    # velocity in [T-31s, T-1s] vs [T-61s, T-31s].
+    v_recent = sum(1 for t in recent_trades
+                   if 1 < (now - t.get("ts", 0)) <= 31)
+    v_prior = sum(1 for t in recent_trades
+                  if 31 < (now - t.get("ts", 0)) <= 61)
+
+    if v_prior <= 0 and v_recent <= 0:
+        return 0.0
+
+    # Acceleration = (v_recent - v_prior) / v_prior
+    # But avoid div-by-zero: use max(v_prior, 1) as denominator
+    accel = (v_recent - v_prior) / max(v_prior, 1)
+
+    if accel < 1.0:
+        return 0.0  # No meaningful acceleration (less than 2x increase)
+
+    # Log scale: 1x→0.0, 2x→0.25, 5x→0.58, 10x→0.83, 20x→1.0
+    score = math.log(max(accel, 1.0) + 1) / math.log(21)
+    return _clamp(score)
+
+
+def event_relative_flow(
+    ticker: str,
+    ticker_volume: float,
+    sibling_volumes: list[dict],
+) -> float:
+    """
+    Feature 12: Is this ticker getting a DISPROPORTIONATE share of
+    its event's total flow?
+
+    In mutually exclusive markets (e.g., Masters Tournament golfer winner),
+    absolute volume on one golfer means nothing if the whole tournament
+    is trending. Alpha exists only in the *relative share* directed at
+    one specific outcome vs its siblings.
+
+    Returns conviction_delta: how much MORE flow this ticker is getting
+    compared to uniform distribution across event siblings.
+
+    Structurally price-independent: a $0.05 longshot getting 40% of event
+    flow when it's 1-of-20 has the same score as a $0.50 favorite
+    getting 40% — it's the *disproportionality* that matters.
+    """
+    n_siblings = len(sibling_volumes)
+    if n_siblings <= 1:
+        # Standalone Yes/No market — compute YES vs NO flow ratio
+        # from a single ticker. Returns 0.0 (no cross-market context).
+        return 0.0
+
+    total_event_volume = sum(s.get("volume_24h", 0) or 0 for s in sibling_volumes)
+    if total_event_volume <= 0:
+        return 0.0
+
+    # This ticker's share of total event flow
+    ticker_share = ticker_volume / (total_event_volume + 1e-9)
+
+    # Expected share under uniform distribution
+    expected_share = 1.0 / n_siblings
+
+    # Conviction delta: positive = absorbing disproportionate flow
+    delta = ticker_share - expected_share
+
+    # Normalize: map to [0, 1] where 0.5+ is meaningful concentration
+    # A delta of 0.20 (20pp above expected) → score ~0.6
+    # A delta of 0.50 (50pp above expected) → score ~1.0
+    if delta <= 0:
+        return 0.0  # Below-average flow share — not an anomaly
+
+    score = min(delta / 0.50, 1.0)
+    return _clamp(score)
+
+
 # ── Composite Score ───────────────────────────────────────────────────
 
 
@@ -513,6 +614,45 @@ class FeatureEngine:
                 )
             else:
                 features["book_pressure_delta"] = 0.0
+
+        # ── Compute intrinsically orthogonal features (11-12) ────────
+        # These are structurally price-independent by construction.
+        # ML-only: logged for model training, NOT in composite score.
+
+        if FEATURE_ENABLED.get("flow_acceleration", True):
+            features["flow_acceleration"] = flow_acceleration(recent_trades, now)
+
+        if FEATURE_ENABLED.get("event_relative_flow", True):
+            event_prefix = ticker.rsplit("-", 1)[0]
+            sibling_vols = self._store.get_event_sibling_volumes(event_prefix)
+            ticker_vol = profile.get("volume_24h", 0) if profile else 0
+
+            # ── Staleness guard (Sprint 13) ─────────────────────────────
+            # market_profiles.volume_24h is batch-recomputed every
+            # METADATA_REFRESH_SEC (300s) by metadata_refresh_loop(),
+            # NOT per-trade. So siblings refresh together in a batch.
+            # The relevant failure mode is a STALLED metadata loop (e.g.,
+            # event loop starvation as in Sprint 12) — not per-trade
+            # WebSocket jitter. Threshold = 2× refresh interval catches
+            # genuine stalls without tripping on normal operation.
+            # If ANY sibling is stale beyond this, refuse to score the
+            # whole feature — trading on desynced cross-sections would
+            # mechanically inflate the triggering ticker's share.
+            MAX_SIBLING_STALENESS_SEC = 600.0  # 10 min = 2× refresh interval
+            stale_sibling = False
+            for s in sibling_vols:
+                updated_at = s.get("updated_at") or 0
+                if updated_at > 0 and (now - updated_at) > MAX_SIBLING_STALENESS_SEC:
+                    stale_sibling = True
+                    break
+
+            if stale_sibling:
+                features["event_relative_flow"] = 0.0
+                features["_event_rel_flow_stale"] = 1  # telemetry flag
+            else:
+                features["event_relative_flow"] = event_relative_flow(
+                    ticker, ticker_vol, sibling_vols,
+                )
 
         # Get entry price for probability-conditioned penalty
         entry_price_cents = trade.get("yes_price") or trade.get("no_price")
