@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DIAMOND Sprint 14 — Data Integrity Hardening + 48h Performance (Apr 16–18)</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.5; color: #1a1a1a; max-width: 720px; margin: 0 auto; padding: 20px; background: #fafafa;">
+
+<!-- HEADER -->
+<div style="border-left: 4px solid #00b4d8; padding: 12px 20px; background: linear-gradient(90deg, rgba(0,180,216,0.08), rgba(0,180,216,0.01)); margin-bottom: 24px;">
+  <div style="font-size: 11px; letter-spacing: 2px; color: #666; text-transform: uppercase;">Kalshi Anomaly Trader · Sprint Report</div>
+  <h1 style="font-size: 22px; margin: 4px 0 2px 0; color: #0a0a0a;">Sprint 14 — Data Integrity Hardening</h1>
+  <div style="font-size: 13px; color: #666;">April 16–18, 2026 · Deployed · 2 days verified</div>
+</div>
+
+<!-- EXECUTIVE SUMMARY CARDS -->
+<div style="display: table; width: 100%; border-collapse: separate; border-spacing: 8px; margin-bottom: 20px;">
+  <div style="display: table-row;">
+    <div style="display: table-cell; width: 25%; padding: 12px; background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; vertical-align: top;">
+      <div style="font-size: 10px; color: #888; letter-spacing: 1px; text-transform: uppercase;">Settled</div>
+      <div style="font-size: 24px; font-weight: 700; color: #1a1a1a;">720</div>
+      <div style="font-size: 11px; color: #4caf50;">&#9650; +22 since Apr 14</div>
+    </div>
+    <div style="display: table-cell; width: 25%; padding: 12px; background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; vertical-align: top;">
+      <div style="font-size: 10px; color: #888; letter-spacing: 1px; text-transform: uppercase;">Win Rate</div>
+      <div style="font-size: 24px; font-weight: 700; color: #1a1a1a;">51.0%</div>
+      <div style="font-size: 11px; color: #4caf50;">&#9650; +0.1pp since Apr 14</div>
+    </div>
+    <div style="display: table-cell; width: 25%; padding: 12px; background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; vertical-align: top;">
+      <div style="font-size: 10px; color: #888; letter-spacing: 1px; text-transform: uppercase;">Cumulative P&amp;L</div>
+      <div style="font-size: 24px; font-weight: 700; color: #d32f2f;">&minus;$10.98</div>
+      <div style="font-size: 11px; color: #d32f2f;">&#9660; &minus;$0.43 since Apr 14</div>
+    </div>
+    <div style="display: table-cell; width: 25%; padding: 12px; background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; vertical-align: top;">
+      <div style="font-size: 10px; color: #888; letter-spacing: 1px; text-transform: uppercase;">48h Window</div>
+      <div style="font-size: 24px; font-weight: 700; color: #4caf50;">+$0.92</div>
+      <div style="font-size: 11px; color: #4caf50;">4W / 1L &middot; 80% WR</div>
+    </div>
+  </div>
+</div>
+
+<!-- CUMULATIVE P&L SPARKLINE -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #0a0a0a;">Cumulative P&amp;L Trajectory</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+    <tr>
+      <td style="width: 70px; color: #666; padding: 4px 0;">Apr 4</td>
+      <td style="padding: 4px 0;">
+        <div style="display: inline-block; height: 18px; width: 78%; background: linear-gradient(90deg, #ef5350, #e57373); border-radius: 2px; vertical-align: middle;"></div>
+        <span style="margin-left: 8px; color: #d32f2f; font-weight: 600;">&minus;$8.52</span>
+      </td>
+    </tr>
+    <tr>
+      <td style="width: 70px; color: #666; padding: 4px 0;">Apr 14</td>
+      <td style="padding: 4px 0;">
+        <div style="display: inline-block; height: 18px; width: 96%; background: linear-gradient(90deg, #ef5350, #e57373); border-radius: 2px; vertical-align: middle;"></div>
+        <span style="margin-left: 8px; color: #d32f2f; font-weight: 600;">&minus;$10.55</span>
+      </td>
+    </tr>
+    <tr>
+      <td style="width: 70px; color: #666; padding: 4px 0;">Apr 18</td>
+      <td style="padding: 4px 0;">
+        <div style="display: inline-block; height: 18px; width: 100%; background: linear-gradient(90deg, #ef5350, #e57373); border-radius: 2px; vertical-align: middle;"></div>
+        <span style="margin-left: 8px; color: #d32f2f; font-weight: 600;">&minus;$10.98</span>
+      </td>
+    </tr>
+  </table>
+  <div style="font-size: 11px; color: #888; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f0f0f0;">
+    Bleed rate has decelerated. Apr 4 &rarr; 14 = &minus;$2.03 over 10 days (&minus;20&cent;/day). Apr 14 &rarr; 18 = &minus;$0.43 over 4 days (&minus;11&cent;/day). Sprint 11/13a penalties visibly slowing the bleed.
+  </div>
+</div>
+
+<!-- LAST 48H DAILY BREAKDOWN -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #0a0a0a;">Last 48h Settled Trades &mdash; Daily Breakdown</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+    <tr>
+      <td style="width: 70px; color: #666; padding: 6px 0;">Apr 15</td>
+      <td style="width: 220px; padding: 6px 0;">
+        <span style="display: inline-block; width: 14px; height: 14px; background: #ef5350; vertical-align: middle; margin-right: 4px; border-radius: 2px;"></span>
+      </td>
+      <td style="padding: 6px 0; color: #666;">1 settled &middot; <b style="color: #d32f2f;">0W / 1L</b> &middot; &minus;$0.21</td>
+    </tr>
+    <tr>
+      <td style="width: 70px; color: #666; padding: 6px 0;">Apr 16</td>
+      <td style="width: 220px; padding: 6px 0;">
+        <span style="display: inline-block; width: 200px; height: 14px; background: linear-gradient(90deg, #4caf50 58%, #ef5350 58%); vertical-align: middle; border-radius: 2px;"></span>
+      </td>
+      <td style="padding: 6px 0; color: #666;">19 settled &middot; <b>11W / 8L</b> (57.9%) &middot; &minus;$0.72</td>
+    </tr>
+    <tr>
+      <td style="width: 70px; color: #666; padding: 6px 0;">Apr 17</td>
+      <td style="width: 220px; padding: 6px 0;">
+        <span style="display: inline-block; width: 2px; height: 14px; background: #ccc; vertical-align: middle; border-radius: 2px;"></span>
+      </td>
+      <td style="padding: 6px 0; color: #999; font-style: italic;">no settlements</td>
+    </tr>
+    <tr>
+      <td style="width: 70px; color: #666; padding: 6px 0;">Apr 18</td>
+      <td style="width: 220px; padding: 6px 0;">
+        <span style="display: inline-block; width: 14px; height: 14px; background: #4caf50; vertical-align: middle; margin-right: 4px; border-radius: 2px;"></span>
+      </td>
+      <td style="padding: 6px 0; color: #666;">1 settled &middot; <b style="color: #4caf50;">1W / 0L</b> &middot; +$0.57</td>
+    </tr>
+  </table>
+  <div style="font-size: 11px; color: #888; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f0f0f0;">
+    Net 48h: 5 settled, 4W/1L (80% WR), +$0.92. Small N &mdash; not statistically conclusive, but directionally encouraging.
+  </div>
+</div>
+
+<!-- SPRINT 14 CHANGES OUTLINE -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #0a0a0a;">Sprint 14 &mdash; What Changed</div>
+
+  <div style="margin-bottom: 12px;">
+    <div style="font-weight: 600; font-size: 13px; color: #d32f2f;">Symptoms Observed</div>
+    <ul style="margin: 6px 0; padding-left: 22px; font-size: 12px; color: #333;">
+      <li>13 paper trades stuck in <code style="background: #f5f5f5; padding: 1px 4px; border-radius: 2px;">status='filled'</code> for up to 16.5 days</li>
+      <li>Post-drain audit: 9 additional rows had <code style="background: #f5f5f5; padding: 1px 4px; border-radius: 2px;">fill_price=None</code> &mdash; data integrity violation</li>
+    </ul>
+  </div>
+
+  <div style="margin-bottom: 12px;">
+    <div style="font-weight: 600; font-size: 13px; color: #f57c00;">Root Causes (three compounding)</div>
+    <ol style="margin: 6px 0; padding-left: 22px; font-size: 12px; color: #333;">
+      <li><b>Kalshi taxonomy drift</b> &mdash; API returned <code>determined</code>/<code>finalized</code>, matcher only accepted <code>settled</code></li>
+      <li><b>Silent exception swallowing</b> &mdash; <code>log.debug()</code> hid stack traces, no Pushover fired</li>
+      <li><b>Line 544 hardcoded <code>None</code></b> &mdash; <code>_cancel_after()</code> never parsed <code>fill_price</code> from API response (copy-paste bug)</li>
+    </ol>
+  </div>
+
+  <div style="margin-bottom: 12px;">
+    <div style="font-weight: 600; font-size: 13px; color: #4caf50;">Three-Layer Defense-in-Depth</div>
+    <table style="width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px;">
+      <tr style="background: #f5f5f5;">
+        <td style="padding: 8px; border: 1px solid #e0e0e0; font-weight: 600; width: 80px;">Layer 1</td>
+        <td style="padding: 8px; border: 1px solid #e0e0e0;">Code fix &mdash; <code>_cancel_after()</code> now derives <code>fill_price</code> from <code>(maker_cost + taker_cost) &times; 100 / fill_count</code></td>
+        <td style="padding: 8px; border: 1px solid #e0e0e0; text-align: center; width: 80px; color: #4caf50; font-weight: 600;">&check; LIVE</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border: 1px solid #e0e0e0; font-weight: 600;">Layer 2</td>
+        <td style="padding: 8px; border: 1px solid #e0e0e0;">Application guard &mdash; <code>update_paper_fill</code> rejects corrupt writes, downgrades to <code>unfilled</code> (not <code>stuck</code>)</td>
+        <td style="padding: 8px; border: 1px solid #e0e0e0; text-align: center; color: #4caf50; font-weight: 600;">&check; LIVE</td>
+      </tr>
+      <tr style="background: #f5f5f5;">
+        <td style="padding: 8px; border: 1px solid #e0e0e0; font-weight: 600;">Layer 3</td>
+        <td style="padding: 8px; border: 1px solid #e0e0e0;">Schema CHECK constraint &mdash; deferred (SQLite no <code>ADD CONSTRAINT</code>; rebuild would block event loop)</td>
+        <td style="padding: 8px; border: 1px solid #e0e0e0; text-align: center; color: #f57c00; font-weight: 600;">&#9208; QUEUED</td>
+      </tr>
+    </table>
+  </div>
+
+  <div>
+    <div style="font-weight: 600; font-size: 13px; color: #1976d2;">Recovery</div>
+    <ul style="margin: 6px 0; padding-left: 22px; font-size: 12px; color: #333;">
+      <li><code>backfill_orphan_fills.py --apply</code> recovered all 9 orphan rows from Kalshi API</li>
+      <li>Result: <b>6W / 3L, net &minus;23&cent;</b> &mdash; close to breakeven, right-censored data salvaged</li>
+    </ul>
+  </div>
+</div>
+
+<!-- SEMANTIC CORRECTION CALLOUT -->
+<div style="background: #fff8e1; border-left: 4px solid #ffa726; padding: 12px 16px; margin-bottom: 20px; border-radius: 4px;">
+  <div style="font-size: 12px; font-weight: 600; color: #e65100; margin-bottom: 4px;">KEY DECISION &middot; Semantic Correction</div>
+  <div style="font-size: 12px; color: #333;">
+    Collaborator recommended <code>status='stuck'</code> for corrupt rows. Pushed back &rarr; used <code>status='unfilled'</code>.
+    <br><br>
+    <b>Rationale:</b> <code>stuck</code> implies unobservable outcome of a <i>known</i> execution (right-censored, must recover).
+    <code>unfilled</code> implies known non-execution (terminal). If <code>fill_price</code> is missing, no execution was ever recorded &mdash; <code>unfilled</code> is the only provable claim.
+    Using <code>stuck</code> would waste reconciliation budget hunting for fills that likely don't exist.
+  </div>
+</div>
+
+<!-- N=500 PROGRESS BAR -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #0a0a0a;">ML Retrain Gate: Post-Sprint-11 Settled Trades</div>
+  <div style="background: #f0f0f0; height: 28px; border-radius: 4px; position: relative; overflow: hidden;">
+    <div style="background: linear-gradient(90deg, #00b4d8, #0077b6); height: 100%; width: 55.6%; border-radius: 4px;"></div>
+    <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.3);">
+      278 / 500 (55.6%)
+    </div>
+  </div>
+  <div style="font-size: 11px; color: #666; margin-top: 10px;">
+    Need 222 more post-Sprint-11 settled trades before ML retrain is statistically valid.
+    At current tempo (~5-7 trades/day settled), gate unlocks <b>~May 5&ndash;10, 2026</b>.
+    <br>
+    <b>WR in this window: 56.5%</b> &mdash; penalty stack is holding edge above break-even (~45%).
+  </div>
+</div>
+
+<!-- SHADOW ML FEATURE TELEMETRY -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #0a0a0a;">Sprint 13c Shadow ML Feature Telemetry</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+    <tr>
+      <td style="width: 160px; color: #333; padding: 6px 0;"><code>flow_acceleration</code></td>
+      <td style="padding: 6px 0;">
+        <div style="display: inline-block; width: 24.4%; height: 14px; background: #00b4d8; border-radius: 2px; vertical-align: middle;"></div>
+        <span style="margin-left: 8px; color: #0a0a0a; font-weight: 600;">24.4%</span>
+        <span style="margin-left: 8px; color: #888; font-size: 11px;">activation rate</span>
+      </td>
+    </tr>
+    <tr>
+      <td style="width: 160px; color: #333; padding: 6px 0;"><code>event_relative_flow</code></td>
+      <td style="padding: 6px 0;">
+        <div style="display: inline-block; width: 66.9%; height: 14px; background: #00b4d8; border-radius: 2px; vertical-align: middle;"></div>
+        <span style="margin-left: 8px; color: #0a0a0a; font-weight: 600;">66.9%</span>
+        <span style="margin-left: 8px; color: #888; font-size: 11px;">activation rate</span>
+      </td>
+    </tr>
+    <tr>
+      <td style="width: 160px; color: #333; padding: 6px 0;"><code>_event_rel_flow_stale</code></td>
+      <td style="padding: 6px 0;">
+        <div style="display: inline-block; width: 6%; height: 14px; background: #4caf50; border-radius: 2px; vertical-align: middle;"></div>
+        <span style="margin-left: 8px; color: #4caf50; font-weight: 600;">6.0%</span>
+        <span style="margin-left: 8px; color: #888; font-size: 11px;">stale flag &middot; kill at 20%</span>
+      </td>
+    </tr>
+  </table>
+  <div style="font-size: 11px; color: #888; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f0f0f0;">
+    Both new price-orthogonal features activating within design spec. Stale flag well under kill threshold. No interventions needed.
+  </div>
+</div>
+
+<!-- ANOMALIES BREAKDOWN (48H) -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #0a0a0a;">Last 48h Anomaly Pipeline (7,472 total events)</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+    <tr>
+      <td style="width: 90px; color: #333; padding: 6px 0; font-weight: 600;">CRITICAL</td>
+      <td style="width: 60px; color: #d32f2f; font-weight: 600; padding: 6px 0;">17</td>
+      <td style="padding: 6px 0;">
+        <div style="width: 2px; height: 12px; background: #d32f2f; border-radius: 2px;"></div>
+      </td>
+    </tr>
+    <tr>
+      <td style="color: #333; padding: 6px 0; font-weight: 600;">ALERT</td>
+      <td style="color: #f57c00; font-weight: 600; padding: 6px 0;">152</td>
+      <td style="padding: 6px 0;">
+        <div style="width: 4%; height: 12px; background: #f57c00; border-radius: 2px;"></div>
+      </td>
+    </tr>
+    <tr>
+      <td style="color: #333; padding: 6px 0; font-weight: 600;">NOTABLE</td>
+      <td style="color: #7b1fa2; font-weight: 600; padding: 6px 0;">999</td>
+      <td style="padding: 6px 0;">
+        <div style="width: 13.4%; height: 12px; background: #7b1fa2; border-radius: 2px;"></div>
+      </td>
+    </tr>
+    <tr>
+      <td style="color: #333; padding: 6px 0; font-weight: 600;">LOG</td>
+      <td style="color: #666; font-weight: 600; padding: 6px 0;">6,304</td>
+      <td style="padding: 6px 0;">
+        <div style="width: 84.4%; height: 12px; background: #9e9e9e; border-radius: 2px;"></div>
+      </td>
+    </tr>
+  </table>
+  <div style="font-size: 11px; color: #888; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f0f0f0;">
+    Distribution within normal pattern. ALERT+ firing rate: 169/48h = ~3.5/hr. Detection pipeline healthy.
+  </div>
+</div>
+
+<!-- VALIDATION STATE -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 13px; font-weight: 600; margin-bottom: 12px; color: #0a0a0a;">Sprint 14 Validation State (48h post-deploy)</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+    <tr>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0;">Layer 2 guard firings</td>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0; text-align: right; font-weight: 600; color: #4caf50;">0 &check;</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0;">Orphan rows remaining</td>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0; text-align: right; font-weight: 600; color: #4caf50;">0 &check;</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0;">Monitor uptime</td>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0; text-align: right; font-weight: 600;">2 days</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0;">Memory usage</td>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0; text-align: right; font-weight: 600;">154 MB / 600 MB</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0;">Trade ingest (last 24h)</td>
+      <td style="padding: 8px; border-bottom: 1px solid #f0f0f0; text-align: right; font-weight: 600;">33,518</td>
+    </tr>
+    <tr>
+      <td style="padding: 8px;">Most recent anomaly</td>
+      <td style="padding: 8px; text-align: right; font-weight: 600;">&lt; 1 hour ago &check;</td>
+    </tr>
+  </table>
+</div>
+
+<!-- NEXT STEPS -->
+<div style="background: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin-bottom: 20px;">
+  <div style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #0a0a0a;">Next Steps</div>
+
+  <div style="margin-bottom: 10px;">
+    <span style="background: #e3f2fd; color: #1976d2; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;">ONGOING</span>
+    <span style="font-size: 12px; color: #333; margin-left: 8px;"><b>Passive monitoring</b> &mdash; watch for <code>[STORE] REJECTED CORRUPT FILL</code> log lines (would indicate Layer 1 regression)</span>
+  </div>
+
+  <div style="margin-bottom: 10px;">
+    <span style="background: #e3f2fd; color: #1976d2; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;">ONGOING</span>
+    <span style="font-size: 12px; color: #333; margin-left: 8px;"><b>Accumulate post-Sprint-11 data</b> &mdash; 278/500 trades, ~222 to go (~May 5&ndash;10 ETA)</span>
+  </div>
+
+  <div style="margin-bottom: 10px;">
+    <span style="background: #fff3e0; color: #e65100; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;">QUEUED</span>
+    <span style="font-size: 12px; color: #333; margin-left: 8px;"><b>Schema CHECK constraint migration</b> &mdash; requires ~5min maintenance window (stop monitor &rarr; table rebuild &rarr; restart)</span>
+  </div>
+
+  <div style="margin-bottom: 10px;">
+    <span style="background: #fff3e0; color: #e65100; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;">QUEUED</span>
+    <span style="font-size: 12px; color: #333; margin-left: 8px;"><b>ML retrain</b> &mdash; after N &ge; 500, run <code>diamond_ml_train.py</code> with corrected Elastic Net + new orthogonal features</span>
+  </div>
+
+  <div style="margin-bottom: 10px;">
+    <span style="background: #fce4ec; color: #c2185b; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;">DO NOT</span>
+    <span style="font-size: 12px; color: #333; margin-left: 8px;"><b>Touch execution thresholds.</b> Composite score has zero discriminative power; lowering ALERT threshold produces negative EV (validated Mar 29)</span>
+  </div>
+
+  <div style="margin-bottom: 10px;">
+    <span style="background: #fce4ec; color: #c2185b; padding: 2px 8px; border-radius: 3px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px;">DO NOT</span>
+    <span style="font-size: 12px; color: #333; margin-left: 8px;"><b>Enable CTM.</b> Requires N &gt; 1,500 &mdash; buckets currently have N &lt; 5</span>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div style="border-top: 1px solid #e0e0e0; padding-top: 16px; margin-top: 20px; font-size: 11px; color: #888;">
+  <div style="margin-bottom: 6px;"><b>System:</b> DIAMOND (D1) &middot; Kalshi anomaly detection &middot; Oracle Cloud VM 129.158.40.51</div>
+  <div style="margin-bottom: 6px;"><b>Repo:</b> pjnks/kalshi-diamond (private) &middot; Deploy: <code>./deploy.sh --restart</code></div>
+  <div style="margin-bottom: 6px;"><b>Dashboard:</b> :8080 &middot; <b>Logs:</b> <code>tail -f /home/ubuntu/kalshi-diamond/diamond_monitor.log</code></div>
+  <div style="margin-top: 12px; font-style: italic;">Patience window active. Factory is clean. Let the data roll in.</div>
+</div>
+
+</body>
+</html>

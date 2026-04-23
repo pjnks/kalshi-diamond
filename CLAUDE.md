@@ -107,7 +107,7 @@ Optional tiered ML pipeline running in shadow mode (logging, not acting) until v
 - **Tier 1 (Elastic Net):** L1+L2 regularized logistic regression (l1_ratio=0.7) — achieves sparsity while sharing weight among correlated features for day-to-day stability. Upgraded from pure Lasso (l1_ratio=1.0) per quant review (March 2026).
 - **Tier 2 (GBM):** GradientBoosting — requires **1000+ samples** (raised from 150) and must beat Lasso by >0.005 Brier. At current trade rates, GBM is effectively disabled for months.
 - **Edge prediction:** `edge = P_calibrated(win) - P_market(win)` — positive edge = favorable mispricing
-- **Kelly sizing:** NOT YET IMPLEMENTED — requires 60+ days of shadow-mode validation with calibration slope in [0.8, 1.2] before edge estimates can be trusted for sizing
+- **Kelly sizing (Sprint 14c, DORMANT):** Scaffolded in `src/diamond_kelly.py`. Feature-flagged OFF (`KELLY_SIZING_ENABLED=false`). Formula: `f* = E/(1-p)` with Half-Kelly safety multiplier (0.5), slippage-adjusted hurdle (`MIN_EDGE_HURDLE=0.02` — matches measured +0.77¢ adverse slippage), 5% per-trade cap for tail-event survival. Self-check harness passes 6 test cases on import. Activation requires: (a) N≥500 post-Sprint-11, (b) ML shadow model passes Brier<0.25 AND Jaccard≥0.70, (c) backtest validates vs flat sizing via `backtest_kelly.py`. Critical nuance: ML edge must also be wired into ENTRY gate (not just sizing) — else Kelly sizes trades the composite-score gate admits, which Sprint 13b proved has near-zero IC.
 - **Per-fold CV leakage fixes (peer review, March 2025):**
   - Category target encoding recomputed per CV fold (prevents test-label leakage)
   - StandardScaler fit per fold on training data only (prevents feature distribution leakage)
@@ -157,13 +157,19 @@ Diamond suffered daily 21+ hour staleness incidents where the WebSocket hung sil
 | `src/diamond_alerts.py` | Alert engine with level-aware cooldowns |
 | `src/diamond_paper.py` | **Live trading engine** — auto-bet on anomalies, book-aware pricing, portfolio intelligence gates |
 | `src/diamond_ml.py` | Shadow ML pipeline (Lasso + GBM), edge prediction, null importance test |
+| `src/diamond_kelly.py` | **DORMANT Kelly sizing utility** (Sprint 14c). `kelly_fraction()` + `kelly_contracts()`. Half-Kelly default, slippage-adjusted hurdle 0.02, 5% per-trade cap. Self-check harness on import. NOT imported by production. |
 | `src/bounded_dict.py` | Memory-bounded dictionary for market profile caching |
 | `diamond_monitor.py` | Main async loop (entry point) — runs everything, PID lock guard |
 | `diamond_dashboard.py` | Dash visualization at :8080 (futuristic terminal aesthetic) |
 | `diamond_dashboard_lite.py` | Lightweight fallback dashboard |
 | `diamond_backtest.py` | Historical replay + grid search + DSR output |
 | `diamond_ml_train.py` | ML model training script |
+| `backtest_kelly.py` | **Kelly vs flat sizing harness** (Sprint 14c). 3-phase: Oracle / Sensitivity sweep / PiT empirical. Event-cluster block bootstrap, ledger invariant assertion. |
 | `reconcile_fills.py` | Utility to reconcile fill records with Kalshi API |
+| `reconcile_stuck_trades.py` | Sprint 14: drain orphan `status='filled'` rows via forced settlement queries (Kalshi taxonomy-drift fix) |
+| `backfill_orphan_fills.py` | Sprint 14: recover fill_price from Kalshi API for orphan rows, drive settlement |
+| `migrations/apply_check_constraint.py` | Sprint 14b: Layer 3 schema migration — rebuild `paper_trades` with `check_valid_fill` CHECK. Reusable, `--apply` gate, preflight + smoke test. |
+| `migrations/README_schema_check_constraint.md` | Sprint 14b runbook + rollback procedure (DEPLOYED 2026-04-20) |
 | `deploy.sh` | Deploy to OCI via systemd: `./deploy.sh` (sync) or `./deploy.sh --restart` |
 | `test_tuning.py` | Live 60s tuning harness |
 | `test_live.py` | Live integration test |
@@ -218,8 +224,262 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - Notification pattern reused from HMM-Trader's `src/notifier.py`
 - Gemstone naming: prefix files with `diamond_` for project-specific modules
 
-## Current Status (April 4, 2026)
-**Live trading active on OCI — 472 settled trades, 49% win rate, -$8.52 cumulative P&L. Sprint 12 deployed.**
+## Current Status (April 20, 2026)
+**Live trading active on OCI — 729 settled trades, 50.9% win rate, -$10.87 cumulative P&L. Sprint 14 (data integrity) + Sprint 14b (Layer 3 schema constraint) DEPLOYED. Sprint 14c (Kelly + backtest) staged dormant. System in patience window awaiting N=500 post-Sprint-11 retrain gate (~mid-July at current tempo).**
+
+**Today (Apr 20 UTC)**: 5 settled, 2W/3L (40% WR, **+$0.59** — inverse of Apr 19 pattern: losing WR, winning P&L). 8 opened. 4 currently open:
+- `KXPERUPRES-26-KFUJ` no @ 67¢ (Apr 13 — long-dated event)
+- `KXNBAROY-26-CFLA` no @ 43¢ (Apr 13 — long-dated event)
+- `KXTRUMPOUT27-27-26AUG01` no @ 95¢ (Apr 20 — long-dated political, in the −3.6pp edge 75+¢ bucket; mathematically near-impossible to clear execution friction at this price, DELIBERATELY NOT INTERVENED to preserve training-distribution right tail for ML retrain)
+- `KXMLBGAME-26APR201845ATLWSH-ATL` yes @ 62¢ (Apr 20 — intraday sports)
+
+**Post-Sprint-11 progress**: 287/500 settled trades toward ML retrain gate. Trade tempo ~2.5/day → gate unlocks **~mid-July 2026** (not May as earlier estimated; recalibrated based on actual tempo).
+
+**All three data-integrity layers LIVE (as of 2026-04-20 04:42 UTC):**
+
+| Layer | Mechanism | Status |
+|---|---|---|
+| 1 — Code | `_cancel_after()` derives fill_price from Kalshi API cost fields | ✓ LIVE (Apr 16) |
+| 2 — Application | `update_paper_fill` guard rejects corrupt writes, downgrades to `unfilled` | ✓ LIVE (Apr 16) |
+| 3 — Schema | `check_valid_fill` CHECK constraint rebuilt `paper_trades` with NOT NULL invariant | ✓ LIVE (Apr 20) |
+
+**Guard telemetry (16h post-Layer-3 deploy):**
+- Layer 2 `[STORE] REJECTED CORRUPT FILL` firings: **0** (Layer 1 covering)
+- Layer 3 `IntegrityError: CHECK constraint failed` firings: **0** (Layer 1+2 covering)
+- Orphans (`status='filled' AND fill_price IS NULL`): **0**
+- `sqlite3 integrity_check`: **ok**
+- Monitor uptime: 16h stable, RSS **242 MB / 600 MB** (plateau'd from startup 389 MB as SQLite mmap warmed; 10 MB Python heap confirms no code-level leak — via `/proc/smaps` analysis)
+
+**Sprint 13c shadow telemetry** (stable): `flow_acceleration` activates 24.4%, `event_relative_flow` activates 66.9%, stale-sibling flag fires on 6.0% (under 20% kill threshold).
+
+### Sprint 14 (2026-04-16/18, DEPLOYED) — Data integrity + execution layer hardening
+
+**Symptoms observed:**
+- 13 paper trades stuck in `status='filled'` for up to 16.5 days (oldest Mar 31)
+- Post-drain forensic: 9 additional rows had `status='filled'` but `fill_price=None` — data integrity violation
+
+**Root causes (three compounding):**
+
+1. **Kalshi taxonomy drift** — API returns `'determined'` or `'finalized'` for some market settlement states, not `'settled'`. Our settlement matcher in `check_settlements()` only accepted `'settled'`, so these were perpetually skipped. Expanded to `{settled, determined, finalized}`.
+
+2. **Silent exception swallowing** — `check_settlements()` caught all exceptions into `log.debug()`. Stack traces disappeared into noise; no Pushover alert. Upgraded to `log.error()` with Pushover on repeated failures.
+
+3. **Fill-price corruption (line 544)** — `diamond_paper.py::_cancel_after()` had a literal hardcoded `None` where `fill_price` should have been parsed from the API response. This was NOT a race condition; the cost data (`maker_fill_cost_dollars`, `taker_fill_cost_dollars`, `fill_count_fp`) was in the response all along — just never read. Classic copy-paste bug.
+
+**Three-layer defense-in-depth:**
+
+1. **Layer 1 — Code fix**: Rewrote `_cancel_after()` signature to accept `limit_price` fallback. On partial-fill detection, derive `fill_price = round((maker_cost + taker_cost) * 100 / fill_count)`. Fallback to `limit_price` if API cost fields are absent/zero.
+
+   ```python
+   async def _cancel_after(self, order_id, row_id, ticker, delay_sec, limit_price):
+       # ... fetch order status ...
+       if fill_count > 0:
+           try:
+               maker_cost = float(order.get("maker_fill_cost_dollars", "0") or "0")
+               taker_cost = float(order.get("taker_fill_cost_dollars", "0") or "0")
+               total_cost = maker_cost + taker_cost
+               fill_price = int(round(total_cost * 100 / fill_count)) if total_cost > 0 else int(limit_price)
+           except (TypeError, ValueError):
+               fill_price = int(limit_price)
+           self._store.update_paper_fill(row_id, order_id, fill_price, fill_count, "filled")
+   ```
+
+2. **Layer 2 — Application guard in `diamond_store.py::update_paper_fill`**:
+
+   ```python
+   if status == "filled":
+       is_corrupt = (
+           fill_price is None
+           or not isinstance(fill_price, (int, float))
+           or fill_price <= 0
+           or fill_count is None
+           or not isinstance(fill_count, (int, float))
+           or fill_count <= 0
+       )
+       if is_corrupt:
+           log.critical(f"[STORE] REJECTED CORRUPT FILL: row_id={row_id} ...")
+           status = "unfilled"
+           fill_price = 0
+           fill_count = 0
+   ```
+
+   **Semantic decision**: Downgrade to `unfilled`, NOT `stuck`. Rationale:
+   - `stuck` = *unobservable outcome of a known execution* (right-censored, should recover)
+   - `unfilled` = *known non-execution* (terminal state, no recovery)
+   - If `fill_price` is missing, no execution was ever recorded → `unfilled` is the only provable claim
+   - Using `stuck` would waste reconciliation budget hunting for fills that likely don't exist
+
+3. **Layer 3 — Schema CHECK constraint (DEFERRED)**:
+
+   ```sql
+   CHECK (status NOT IN ('filled','settled','closed')
+          OR (fill_price IS NOT NULL AND fill_count > 0))
+   ```
+
+   SQLite has no `ALTER TABLE ADD CONSTRAINT` — requires full table rebuild (create new, `INSERT INTO new SELECT * FROM old`, drop old, rename). On 1-OCPU VM with 125MB DB, this is a synchronous 30-60s operation that would block the asyncio event loop (Sprint 12 lessons: WebSocket keep-alive times out in minutes). Deferred to maintenance window with full runbook in `migrations/README_schema_check_constraint.md`.
+
+**Orphan backfill** (`backfill_orphan_fills.py`, ~230 lines):
+- Dry-run by default, `--apply` gate
+- Per orphan row: queries `/portfolio/orders/{order_id}` + market details via Kalshi API
+- Derives `fill_price` from `(maker_fill_cost_dollars + taker_fill_cost_dollars) × 100 / fill_count_fp`
+- Computes P&L from market settlement value
+- Drives settlement through existing `update_paper_settlement` / `mark_paper_voided` methods
+- Preserves original `opened_at`; sets `filled_at = COALESCE(filled_at, opened_at)`
+- Idempotent: stuck→settled transition removes row from future runs
+- **Result**: All 9 orphans recovered, 6W/3L, net −23¢
+
+**Validation** (2026-04-18, ~48h post-deploy):
+- Guard firings: 0 (Layer 1 fix prevents Layer 2 from ever triggering — ideal state)
+- Orphans remaining: 0
+- Monitor uptime: 2 days stable, 154MB/600MB RAM
+- Trade ingest healthy: 33k trades/24h, most recent anomaly <1 hour old
+
+### Sprint 14b (2026-04-20, DEPLOYED) — Layer 3 schema constraint
+
+Collaborator sign-off received to execute the deferred CHECK constraint migration during a low-frequency maintenance window.
+
+**Migration execution (04:41–04:43 UTC, ~2 min downtime):**
+1. `systemctl stop diamond-monitor` → clean SIGTERM shutdown
+2. `cp diamond_trades.db diamond_trades.db.pre-check-constraint.bak` (346 MB backup)
+3. Preflight: **0 violations** in current data (805 rows × `status IN ('filled','settled','voided') AND NULL fill_price` check)
+4. `apply_check_constraint.py --apply` — 5-step table rebuild inside single transaction:
+   - `CREATE TABLE paper_trades_new (... CONSTRAINT check_valid_fill CHECK (...))`
+   - `INSERT INTO paper_trades_new SELECT * FROM paper_trades` (805 rows, **<0.1s** — much faster than 30-60s budgeted; scales with row count × row size, not DB file size)
+   - `DROP TABLE paper_trades`
+   - `ALTER TABLE paper_trades_new RENAME TO paper_trades`
+   - `CREATE INDEX idx_paper_ticker, idx_paper_status`
+5. **Smoke test (critical):** forced `INSERT` with `status='filled'` + `NULL fill_price` — confirmed `sqlite3.IntegrityError: CHECK constraint failed: check_valid_fill`. Schema enforcement verified, not just DDL trust.
+6. `systemctl start diamond-monitor` → store reconnected to new schema, ML loaded, paper engine armed, WebSocket subscribed. **No integrity errors, no CHECK violations, 0 guard firings** post-restart.
+
+**Live constraint definition:**
+```sql
+CONSTRAINT check_valid_fill CHECK (
+    status NOT IN ('filled', 'settled', 'voided')
+    OR (fill_price IS NOT NULL AND fill_price > 0
+        AND fill_count IS NOT NULL AND fill_count > 0)
+)
+```
+
+Artifacts: `migrations/apply_check_constraint.py` (reusable, `--apply` gate, preflight + smoke test), `migrations/README_schema_check_constraint.md` (status flipped DEFERRED→DEPLOYED), `diamond_trades.db.pre-check-constraint.bak` retained on VM.
+
+Defense-in-depth now complete: three layers (code / application / schema) with non-overlapping failure domains. Simultaneous silent corruption reaches persistent storage only if all three fail independently.
+
+### Sprint 14c (2026-04-20, STAGED DORMANT) — Kelly sizing + backtest harness
+
+**Motivation:** Phase 1 audit diagnosed flat tiered sizing (CRITICAL=3 / ALERT=2 / ALERT=1) as the root cause of "picking up pennies in front of a steamroller" — favorite-bucket losses swamp longshot-bucket wins. Kelly's edge-proportional sizing mathematically neutralizes this when fed a calibrated edge estimate. Requires ML validation (N=500) before going live; code staged in anticipation.
+
+**Shipped:**
+
+1. **`src/diamond_kelly.py`** — dormant utility, 9.6 KB
+   - Formula: `f* = E / (1 - p)` (binary YES contract Kelly, verified from first principles)
+   - Half-Kelly default (`safety_fraction=0.5`)
+   - **Slippage-adjusted hurdle**: `MIN_EDGE_HURDLE=0.02` (not 0.01) — reflects measured +0.77¢/trade adverse slippage + spread cost
+   - **5% per-trade cap** (`MAX_PER_TRADE_FRACTION`) to survive Over-Kelly ruin (raw Kelly at E=0.15, p=0.80 → f*=0.75)
+   - Two-tier API: `kelly_fraction()` (pure math) → `KellyAllocation` dataclass; `kelly_contracts()` adds bankroll/price → integer contract count
+   - Explicit `rejected` + `reject_reason` on failures (telemetry-ready when activated)
+   - `_self_check()` harness with 6 test cases, runs on `python src/diamond_kelly.py`
+   - Extensive docstring with full activation runbook
+
+2. **`diamond_config.py`** — 4 new flags (all OFF by default):
+   ```python
+   KELLY_SIZING_ENABLED = False  # master kill switch
+   KELLY_SAFETY_FRACTION = 0.5   # Half-Kelly
+   KELLY_MIN_EDGE_HURDLE = 0.02
+   KELLY_MAX_PER_TRADE = 0.05
+   ```
+   Not imported by any production code path; import graph is clean.
+
+3. **`backtest_kelly.py`** — 3-phase historical validation harness (~350 lines)
+   - **Phase A (Oracle):** Feeds actual outcomes as `q_true` → proves the code works given perfect info. Unit test for the formula.
+   - **Phase B (Sensitivity):** Corrupts oracle edges with `N(0, σ)` for σ ∈ {0.01, 0.02, 0.05, 0.10}, biased clip to [0.01, 0.99]. **Output: σ_max tolerance curve** — this derives the ML promotion gate (Brier/Jaccard threshold) numerically instead of by intuition. Per collaborator ruling 2026-04-20: **no Mills-ratio correction** — biased clip is the honest stress test (live ML won't self-center).
+   - **Phase C (Empirical):** PiT price-bucket empirical edge (`bucket_WR − implied_prob`). Lower bound on real Kelly advantage. Warmup skip at `N < MIN_ACTIVE_N=10` per bucket (matches sparse orthogonalizer pattern from Sprint 13c).
+
+4. **Key design invariants:**
+   - **PiT gate: `settled_at < opened_at`** (NOT `opened_at < opened_at`). The subtle leakage: opened-before is historical but outcome-after is unknowable. Using `opened_at` as cutoff would leak contemporaneous-open outcomes.
+   - **Ledger invariant asserted every tick**: `cash + locked + realized == initial_bankroll`. Breaks → bug, not strategy underperformance.
+   - **Kelly base = `cash_available`** (not `total_wealth`) — matches Kalshi margin semantics; greedy approximation of Simultaneous Kelly (gap <10% at our 2-4 concurrent position regime, subsumed by Half-Kelly safety).
+   - **Event-cluster block bootstrap** (not IID) — preserves sibling ticker correlation (±1 for mutually exclusive contracts). Blocks defined by `event_id` only, NOT temporal duration (per collaborator ruling).
+   - **PiT edges computed ONCE on original cohort**, then bootstrap resamples operate on `(trade, precomputed_edge)` pairs. Separates estimator uncertainty from strategy uncertainty.
+
+**NOT shipped (deliberately):** Kelly is not wired into `diamond_paper.py`. Live execution still uses flat tiered sizing. No code path currently imports `diamond_kelly.py` from production. Activation requires explicit config flip + ML integration work (see below).
+
+**Activation path (4 sequential gates — tightened 2026-04-21):**
+1. N ≥ 500 post-Sprint-11 settled trades (tempo projects ~mid-July)
+2. ML retrain produces validated model: **Brier < 0.05 AND Jaccard ≥ 0.70** across CV folds
+   (tightened from Brier < 0.25 after Phase B; see Sprint 14c-addendum below)
+3. **Wire ML edge into entry gate** (not just sizing) — add `ml_edge < MIN_EDGE_HURDLE` pre-entry rejection to `_execute_trade()`. Sprint 13b proved composite score has near-zero IC; Phase C empirically confirmed at −$477/55% DD what happens when Kelly sizes composite-admitted noise.
+4. Backtest validates: run `backtest_kelly.py` on post-N=500 data. Confirm Phase C max-drawdown shrinks vs flat with the new ML-backed edge estimator. Then flip `KELLY_SIZING_ENABLED=true`.
+
+### Sprint 14c-addendum (2026-04-21, HARNESS EXECUTED) — Phase ABC findings
+
+Executed the staged backtest with 3 material code fixes + 1 invariant fix during the run:
+
+**Bug fixes landed in `backtest_kelly.py`:**
+- **Ledger invariant was wrong** (`cash + locked + realized = initial` would double-count gains on every settlement). Corrected to `cash + locked - realized = initial`.
+- **Terminal bankroll double-counted** (was `cash + realized` = `initial + 2·realized`; now just `cash`).
+- **MaxDD was stub-only** (TODO in scaffold). Implemented time-indexed equity curve emitted per settlement; MaxDD computed as peak-to-trough.
+- **Warmup N-matching** (collaborator diagnosis, Phase C trap): when PiT bucket edge returns `None` (bucket N < MIN_ACTIVE_N=10), the trade is dropped from BOTH Kelly and Flat cohorts before metric comparison. Without this, Kelly runs on a different universe than Flat and the comparison is dominated by survival bias.
+
+**Phase A (Oracle, N=289):** Terminal +5050% return, zero drawdown (perfect info → Kelly skips every loser + sub-hurdle winner ≥98¢). Flat: −$1.47 (matches live reality). Harness verified correct.
+
+**Phase B (σ sweep with biased clip, N=289):**
+
+| σ | Kelly P&L | MaxDD % | Brier-equivalent (σ²) |
+|---|---|---|---|
+| 0.00–0.05 | +$51-52k | **0.00%** | ≤0.0025 |
+| 0.07 | +$49.8k | 1.44% | 0.005 |
+| 0.10 | +$43.8k | 5.03% | 0.01 |
+| 0.20 | +$25.4k | 4.33% | 0.04 |
+| 0.30 | +$16.9k | 9.59% | 0.09 |
+| 0.50 | +$7.1k | 13.27% | 0.25 (random) |
+
+**σ_max (zero-DD regime): 0.05** → Brier < 0.0025, effectively oracle.
+**σ_max (< 5% DD): ~0.08** → Brier < 0.006.
+**σ_max (Kelly > Flat P&L, any DD): > 0.50** → biased-clip happy path; Kelly stays profitable across entire sweep because winners always clip to 0.99 and only losers can flip to false-positive edge.
+
+**ML gate tightened to Brier < 0.05** (σ < 0.22, <5% DD). Prior gate of Brier < 0.25 was σ≈0.50 / 13% DD territory — too permissive.
+
+**Phase C (PiT bucket empirical, matched N=227, warmup dropped 62):**
+
+| Strategy | P&L | MaxDD $ | MaxDD % |
+|---|---|---|---|
+| Flat matched | −$0.29 | $6.27 | **0.62%** |
+| Kelly (bucket edge) matched | **−$477.50** | $580.41 | **55.22%** |
+
+Bootstrap (event-cluster, N=10,000): P&L diff mean −$473 [p05: −$685, p95: −$188]. DD diff mean −$637 [p05: −$835, p95: −$440]. **Both intervals entirely negative across all 10,000 draws.**
+
+**15-24¢ STEAMROLLER TOMBSTONE:** 72% of Kelly's total loss (−$344.86 of −$477.50) came from the 15-24¢ bucket alone. Mechanism: early trades in that bucket happened to win, creating a transient bucket WR above the implied-probability range. PiT estimator read this as positive edge. Because 15-24¢ contracts are cheap, Kelly's 5% bankroll cap allowed *thousands* of contracts per trade. When the bucket's true base rate manifested (5% Kelly WR out of 20 takes), concentrated positions in 20¢ contracts got annihilated.
+
+**Interpretation:** Empirical validation of Sprint 13b's theoretical IC finding. Raw price-bucket WR has near-zero post-price IC; Kelly-sizing that noise produces leverage into tail outcomes rather than dampening risk. **Do NOT use bucket-WR as a Kelly edge estimator.** A properly calibrated per-trade ML model is mandatory.
+
+**Gap identified (pending Sprint 14d):** Small-sample variance in bucket estimators masquerades as massive edge on cheap contracts (convexity × leverage). Bayesian shrinkage toward market-implied prior is the fix; architecture staged in `src/diamond_shrinkage.py` (dormant pending prior-strength calibration decision).
+
+### Sprint 13a (2026-04-09, DEPLOYED) — L1 collinearity trap fix
+Lasso (`l1_ratio=1.0`) was zeroing out correlated discriminative features arbitrarily — Jaccard < 0.30 across CV folds (target ≥ 0.70). Switched shadow ML to **Ridge L2** (`l1_ratio=0.0`). Sparsity sacrificed for stability; feature subset now consistent across folds. Live execution unaffected (ML still shadow mode).
+
+### Sprint 13b (2026-04-11, DEPLOYED) — Signal audit + base-rate confound
+Composite score showed inverse U-shape WR vs entry price — pure base-rate artifact (longshots structurally win less, favorites structurally win more, score rides along). Conditional-on-price IC analysis revealed **6 of 8 scorers have |IC| < 0.03** after controlling for entry price. Diagnosis: scorers measure trade *activity*, not directional *edge*. Built `FeatureOrthogonalizer` to residualize features against price for ML training.
+
+### Sprint 13c (2026-04-13, DEPLOYED) — Intrinsically orthogonal features
+Two new shadow ML features designed to be price-independent by construction:
+
+1. **`flow_acceleration`** — 2nd derivative of trade velocity (Δ rate over consecutive 30s windows). Temporal leakage exclusion: window shifted to `[T-31s, T-1s]` and `[T-61s, T-31s]` so the triggering trade at T is excluded from its own measurement.
+
+2. **`event_relative_flow`** — Ticker's share of event-level total volume vs uniform distribution. Event manifold normalization: removes absolute-volume-vs-price coupling.
+
+3. **Sparse-aware orthogonalizer** (`src/diamond_ml.py::FeatureOrthogonalizer`) — Critical mathematical fix. Naive OLS on zero-inflated features hallucinates a deterministic negative correlation with price (synthetic test: −0.59 spurious slope). New version fits OLS on `val != 0` rows only; transforms `val != 0` rows only; zeros stay exact zeros. `MIN_ACTIVE_N=10` skip guard. `SPARSE_FEATURES = {"flow_acceleration", "event_relative_flow"}`.
+
+4. **Sibling staleness guard** — `event_relative_flow` reads `market_profiles.volume_24h` which is batch-refreshed every `METADATA_REFRESH_SEC=300` (NOT per-trade). Threshold: 600s (2× refresh interval). Stale → emit `event_relative_flow=0` and set `_event_rel_flow_stale=1` flag. Kill-switch: stale flag > 20% of activations.
+
+5. **Shadow mode discipline** — New features added to `RAW_FEATURES` in `diamond_ml.py` for ML training only. NOT in `SCORER_WEIGHTS`. Composite score and live execution untouched. `FEATURE_ENABLED["flow_acceleration"] = True` and `FEATURE_ENABLED["event_relative_flow"] = True` in `diamond_config.py`.
+
+6. **`evaluate_model.py` extension** — Added `Sparse Orthogonal Feature Evaluation` block. Reports activation rate, price correlation (kill at >0.30), conditional IC, residual IC, top quintile edge. Kill conditions: `abs(price_corr) > 0.30` OR `abs(cond_ic) < 0.05` at N≥50.
+
+### Patience Discipline (CRITICAL)
+**Hold ML retrain until N=500 post-Sprint-11 settled trades accumulate** (~April 17-20 ETA). Sprint 11 (Apr 2) and Sprint 13a (Apr 9) both changed the data-generating distribution; retraining on N<500 would overfit to a regime that mixes pre/post Sprint 11/13a behavior. The shadow telemetry will accumulate during this window — do NOT rush the retrain.
+
+---
+**Historical sprints (pre-Sprint 13):**
 - Steps 1-8: Core system ✓
 - Dashboard Redesign ✓ (futuristic terminal aesthetic, glassmorphism, Inter + JetBrains Mono)
 - Live Trading Engine ✓ (auto-bet on ALERT+, GTC orders, kill switch, settlement tracking)
@@ -260,6 +520,15 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - **Consolidated Dashboard Disabled ✓** (stopped + disabled, 93MB freed — Sprint 12, April 2026)
 - **DB Pruning Tightened ✓** (7d → 2d — Sprint 12, April 2026)
 - **SQLite mmap_size=256MB ✓** (explicit enable — platform default is 0, disabling causes 3,500+ pread64/sec event loop starvation — Sprint 12, April 2026)
+- **Stuck Settlement Loop Drained ✓** (13 orphan `status='filled'` rows from Kalshi taxonomy drift [`determined`/`finalized`] + silent `log.debug` exception swallowing — `reconcile_stuck_trades.py --apply` — Sprint 14, April 2026)
+- **Fill-Price Corruption Fix ✓** (line 544 of `diamond_paper.py::_cancel_after()` hardcoded `None` — now parses from `maker_fill_cost_dollars + taker_fill_cost_dollars / fill_count` — Sprint 14, April 2026)
+- **Application-Layer Integrity Guard ✓** (`update_paper_fill` rejects corrupt fills, downgrades to `unfilled` — Sprint 14, April 2026)
+- **Schema CHECK Constraint DEPLOYED ✓** (Layer 3: `check_valid_fill` CHECK constraint on `paper_trades` — 805 rows rebuilt in <0.1s — smoke test confirmed constraint rejects NULL fill_price on filled rows — Sprint 14b, 2026-04-20)
+- **Orphan Backfill ✓** (9 rows recovered via `backfill_orphan_fills.py --apply`, 6W/3L/-23¢ — Sprint 14, April 2026)
+- **3-Layer Defense-in-Depth ✓** (code fix + app guard + schema constraint, non-overlapping failure domains — Sprint 14, April 2026)
+- **Layer 3 CHECK Constraint LIVE ✓** (Sprint 14b, 2026-04-20 — 805-row rebuild in <0.1s, smoke-test verified, ~2 min downtime)
+- **Dormant Kelly Utility ✓** (`src/diamond_kelly.py` — Half-Kelly default, 0.02 slippage-adjusted hurdle, 5% cap, feature-flagged off — Sprint 14c, April 2026)
+- **Kelly Backtest Harness ✓** (`backtest_kelly.py` — 3-phase Oracle/Sensitivity/PiT, event-cluster bootstrap, ledger invariant — Sprint 14c, April 2026)
 
 ## Trading Configuration (`.env`)
 ```
@@ -449,35 +718,64 @@ On Linux with systemd cgroups, `PRAGMA mmap_size=N` causes file-backed mmap page
 - `PRAGMA journal_mode=WAL` — concurrent read/write
 - MemoryMax raised to 600MB to accommodate mmap overhead
 
-## Performance Summary (as of April 4, 2026)
-- **Settled trades:** 472
-- **Win rate:** 49% (231W / 241L)
-- **Cumulative P&L:** -$8.52
+## Performance Summary (as of April 20, 2026)
+- **Settled trades:** 729 (+9 since Apr 18)
+- **Win rate:** 50.9% (371W / 358L)
+- **Cumulative P&L:** -$10.87 (+$0.11 since Apr 18 — bleed rate decelerating: Apr 4→14 was −20¢/day, Apr 14→20 is −5¢/day)
+- **Today (Apr 20 UTC):** 5 settled, 2W/3L (40% WR, **+$0.59** — inverse pattern: losing WR, winning P&L)
+- **Post-Sprint-11 (opened ≥ Apr 2):** 287 settled, ~56% WR. **213 short of N=500 retrain gate** (ETA mid-July at current tempo).
+- **Open positions:** 2 long-dated event bets (Peru presidential election, NBA Rookie of the Year — both opened Apr 13; not settlement-bugged, just future events)
 - **Fill rate:** ~91% of placed orders fill
-- **By alert level:** CRITICAL: ~9 trades, 78% WR, +$2.18 P&L — ALERTs: ~460+ trades, 49% WR. CRITICALs dramatically outperform.
-- **By price bucket:** <25¢: 56 trades, 18% WR, +$1.18 (ONLY profitable). **25-49¢: 135 trades, 27% WR, -$13.06 (halted in Sprint 11).** 50-74¢: 169 trades, 58% WR, +$4.04. 75¢+: 81 trades, 81% WR, -$0.63.
-- **Score discrimination:** Zero. Win avg=0.598, loss avg=0.591 (composite score cannot distinguish winners from losers).
-- **Threshold experiment:** Lowering ALERT from 0.55→0.50 (Mar 29) produced 51 trades at -$5.37/day. Reverted — marginal signals lack edge to overcome spread. Do NOT lower again without ML validation.
-- **Tiered sizing deployed:** CRITICAL=3 contracts, High ALERT=2, Low ALERT=1.
-- **ML model:** AUC=0.809, Brier=0.180. Needs retrain. Shadow mode only.
+- **By alert level:** CRITICAL dramatically outperforms ALERT
+- **Tiered sizing deployed:** CRITICAL=3 contracts, High ALERT=2, Low ALERT=1
+- **ML model:** AUC=0.809, Brier=0.180. Needs retrain post N=500. Shadow mode only.
 - **WebSocket health:** ~46 reconnects/day (keepalive timeouts), all auto-recovered
-- **Sprint 11 impact (early signal, N=15):** Post-deployment (Apr 3+): 15 trades, 80% WR, +$0.48. Caveat: N=15 is not statistically significant (SE ≈ 0.26). Need 15+ days for valid assessment.
-- **April 3 dark period:** 15-hour gap in paper trades (02:25–17:50 UTC) due to OOM crash loop. Raw trade data captured (254K trades) but paper trades cannot be retroactively simulated — anomaly scoring is state-dependent and path-dependent.
+- **Sprint 11 impact:** 56.5% WR on 278 settled shows the convexity penalty + YES-side flow penalty are holding. Edge is thin — patience window enforces statistical rigor.
+- **Sprint 14 data integrity:** 9 orphan rows recovered (6W/3L, -23¢), 0 orphans remaining, Layer 2 guard firings: 0 (Layer 1 fix holding for 2+ days).
+
+## Historical Performance Snapshots
+- **April 4**: 472 settled, 49.0% WR, -$8.52 cumulative
+- **April 14**: 698 settled, 50.9% WR, -$10.55 cumulative
+- **April 18**: 720 settled, 51.0% WR, -$10.98 cumulative
+- **April 20**: 729 settled, 50.9% WR, -$10.87 cumulative (Layer 3 deploy day)
 
 ## Next Steps / Roadmap
-- ✅ **[DONE] Monitor Sprint 11 penalty impact** — Post-deployment (Apr 3-4): 15 trades, 80% WR, +$0.48. Trade volume dropped as expected. N=15 is too small for conclusions (need 15+ days).
-- ✅ **[DONE] Backfill categories on historical trades** — 493/493 paper_trades updated from NULL → derived category (April 2, 2026).
-- ✅ **[DONE] OOM crash loop stabilization (Sprint 12)** — 7 independent fixes: MemoryMax 600MB, OOM=-500, inline VACUUM removed, ML→asyncio.to_thread, profile updates limited, watchdog→file check, consolidated-dashboard disabled.
-- **[DO NOT] Flip `CTM_ENABLED=true`** — Keep disabled until **N > 1,500 settled trades** (~5-6 weeks). With ~472 trades across ~15 categories × 24 hours, most CTM buckets have N < 5. Optimizing on N < 30 per bucket guarantees extreme overfitting via bias-variance tradeoff. Categories are backfilled for data integrity and ML features, NOT for CTM activation.
-- **[THIS WEEK] Retrain ML model** — `PYTHONPATH=. python diamond_ml_train.py` with corrected Elastic Net (`l1_ratio=0.7`) + 3 new binned interaction features (`is_longshot_yes`, `is_favorite_no`, `is_mid_yes_spike`). Run `--null-test` to validate the binned features survive permutation test. The composite score has zero discrimination; ML with disjoint regime indicators is the path.
-- **[THIS WEEK] Deploy backtest fixes** (quant friend audit, confirmed present):
-  - [CRITICAL] Directional precision evaluator — replace abs-move "hit" with MFE/MAE relative to trade side
-  - [CRITICAL] EV-based grid search objective — replace cosmetic distribution penalty with expected value optimization
-  - [HIGH] Mid-price edge anchoring — use order book mid-price instead of entry_price for ML edge calculation
-  - [MEDIUM] Sweep/impact latency documentation — backtest doesn't account for post-trade price movement
-- **[ONGOING] Collect post-Sprint 11 out-of-sample data** — Need 15+ days (until ~April 17) with paired t-test on daily P&L for valid assessment of penalty impact. Do NOT draw conclusions from N < 50 trades.
-- **[ONGOING] Track Jaccard stability** — if feature set turnover > 0.50 for 3 consecutive retrains, halt shadow model.
-- **[ONGOING] Shadow P&L on skipped trades** — The execution-layer hard block (YES@25-49¢) prevents observing outcomes for blocked trades. Must periodically compute hypothetical mark-to-market P&L on `skipped_trades` to detect if a blocked regime becomes profitable.
-- **Kelly criterion sizing:** After ML shadow mode validated (Brier < 0.25, Jaccard ≥ 0.70), size by estimated edge
-- **Set up git on OCI:** Replace scp deploy with git pull workflow
-- **Consider Hetzner migration:** Current VM (1 OCPU, 956MB) is at the edge. If trade volume grows or ML retrain gets heavier, migrate to Hetzner CCX23 (~$25/mo, 4GB RAM, 2 vCPU).
+
+### Active state (patience window, ~mid-July 2026 target)
+
+- **[ONGOING] Passive monitoring** — watch for three signals, all of which should stay at zero:
+  - `[STORE] REJECTED CORRUPT FILL` (Layer 2 guard firing → Layer 1 regression)
+  - `sqlite3.IntegrityError: CHECK constraint failed: check_valid_fill` (Layer 3 enforcing → Layer 1+2 both regressed)
+  - Orphan rows in `paper_trades` WHERE status='filled' AND fill_price IS NULL
+  - Any of these firing is a P0 investigation trigger
+- **[ONGOING] Accumulate post-Sprint-11 settled trades** — 287/500 as of Apr 20. Trade tempo ~2.5/day → gate unlocks mid-July. Do NOT touch thresholds or attempt to accelerate flow.
+- **[ONGOING] Track Sprint 13c feature telemetry** — `flow_acceleration` ~24% activation, `event_relative_flow` ~67% activation, stale flag 6% (kill at 20%). Alert if flag exceeds 15%.
+
+### Runnable now (no live data dependency)
+
+- **Run `backtest_kelly.py --phase A`** on current settled cohort — proves kelly_contracts() math works (unit test with oracle).
+- **Run `backtest_kelly.py --phase B --sigmas 0.01,0.02,0.03,0.05,0.07,0.10`** — derives σ_max curve. Output becomes the numerical promotion gate: ML Brier-equivalent must be ≤ σ_max. Reports per-bucket breakdown to see where clipping bites.
+- **Run `backtest_kelly.py --phase C --bootstrap 10000`** — PiT empirical bucket edge. Reports Kelly vs flat on the 287 post-Sprint-11 trades with event-cluster bootstrap CI on P&L difference. Expect Kelly to skip ~20% of trades during warmup.
+
+### Gated (requires N ≥ 500)
+
+- **[GATE 1: N=500] Retrain ML model** — `PYTHONPATH=. python diamond_ml_train.py` with corrected Elastic Net (`l1_ratio=0.7`) on the new sample. Must pass: AUC > 0.55, Brier < 0.25, Jaccard ≥ 0.70 across CV folds.
+- **[GATE 2: ML validated] Wire ML edge into ENTRY gate** — modify `diamond_paper.py::_execute_trade` to add `ml_edge < KELLY_MIN_EDGE_HURDLE` as pre-entry rejection. Without this, Kelly just sizes bad entries differently.
+- **[GATE 3: Entry-gate wired] Flip `KELLY_SIZING_ENABLED=true`** — wire `kelly_contracts()` into `_execute_trade()` sizing path, replacing the flat tiered logic.
+
+### Do NOT
+
+- **[DO NOT] Touch execution thresholds.** Composite score has near-zero IC after price-controlling (Sprint 13b). Lowering ALERT threshold produces negative EV (validated Mar 29, −$5.37/day).
+- **[DO NOT] Intervene on 95¢ trades or other in-steamroller-bucket trades.** The ML retrain MUST see these losses to learn they're toxic. Censoring the right tail breaks training distribution.
+- **[DO NOT] Flip `CTM_ENABLED=true`** — Keep disabled until N > 1,500 settled trades. Bias-variance trap on thin stratification. Categories backfilled for data integrity and ML features, NOT for CTM activation.
+- **[DO NOT] Enable Kelly without all 3 gates.** Kelly sizing bad entries is still bad. Execution-layer ML veto must come first.
+
+### Operational wishlist (no specific gate)
+
+- **Set up git on OCI** — replace scp-based `deploy.sh` with `git pull` workflow.
+- **Hetzner migration consideration** — current 1-OCPU/956MB VM is at the edge. If ML retrain grows or trade tempo increases, migrate to Hetzner CCX23 (~$25/mo, 4GB RAM, 2 vCPU).
+- **Dashboard updates** — consider adding Layer 2/3 guard firing counter to :8080 as a health card.
+
+## Milestone Reports
+
+End-of-sprint / phase / postmortem HTML summaries live in `~/Documents/quant/diamond/reports/YYYY_MM_DD_<slug>.html`. DIAMOND's `.gitignore` does not block HTML files, so reports are tracked by default. See `~/Documents/quant/CLAUDE.md` § Milestone Reports for the full cross-project standard (required sections, palette, triggers). DIAMOND is a frequent candidate for reports — each Sprint deployment (Sprint 11 Sharpe cliff, Sprint 12 infrastructure, Sprint 13 collinearity fixes) merits one.

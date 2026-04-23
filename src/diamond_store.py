@@ -559,7 +559,41 @@ class DiamondStore:
         return cur.lastrowid
 
     def update_paper_fill(self, row_id: int, order_id: str, fill_price: int, fill_count: int, status: str = "filled"):
-        """Update a paper trade after order response."""
+        """Update a paper trade after order response.
+
+        Enforces the mathematical invariant: a row with status='filled' MUST have
+        a positive fill_price and fill_count. Any caller passing corrupt combos
+        (None, 0, negative) with status='filled' is downgraded to 'unfilled'
+        with a CRITICAL log so the data contamination surfaces loudly instead
+        of silently rotting the DB (as happened Mar 29 – Apr 10, producing 9
+        orphan rows that jammed the settlement poll for 16.5 days).
+
+        Note: status='pending' and status='unfilled' legitimately pass
+        fill_price=0/fill_count=0 — those are sentinel values for "nothing
+        has filled yet". The guard only applies to status='filled'.
+        """
+        # Integrity guard: reject corrupt 'filled' writes at the boundary.
+        if status == "filled":
+            is_corrupt = (
+                fill_price is None
+                or not isinstance(fill_price, (int, float))
+                or fill_price <= 0
+                or fill_count is None
+                or not isinstance(fill_count, (int, float))
+                or fill_count <= 0
+            )
+            if is_corrupt:
+                import logging as _logging
+                _logging.getLogger(__name__).critical(
+                    f"[STORE] REJECTED CORRUPT FILL: row_id={row_id} order_id={order_id!r} "
+                    f"attempted status='filled' with fill_price={fill_price!r} "
+                    f"fill_count={fill_count!r}. Downgrading to 'unfilled' to preserve "
+                    f"data integrity. Check upstream caller — this should not happen."
+                )
+                status = "unfilled"
+                fill_price = 0
+                fill_count = 0
+
         self._conn.execute(
             """UPDATE paper_trades
                SET order_id = ?, fill_price = ?, fill_count = ?, status = ?, filled_at = ?
@@ -596,6 +630,43 @@ class DiamondStore:
                    realized_edge = ?
                WHERE id = ?""",
             (settlement, pnl_cents, time.time(), realized_edge, row_id),
+        )
+        self._conn.commit()
+
+    def mark_paper_voided(self, row_id: int):
+        """Mark a paper trade as voided by the exchange (refund, $0 P&L).
+
+        Use ONLY when Kalshi explicitly reports status in ('voided', 'canceled',
+        'refunded'). The trade is a known-$0 outcome — counts as a breakeven in
+        analytics. Do NOT use for unknown/unresolved outcomes — use
+        mark_paper_stuck() for those (right-censored).
+        """
+        self._conn.execute(
+            """UPDATE paper_trades
+               SET settlement = 'void', pnl_cents = 0, status = 'voided',
+                   settled_at = ?, realized_edge = NULL
+               WHERE id = ?""",
+            (time.time(), row_id),
+        )
+        self._conn.commit()
+
+    def mark_paper_stuck(self, row_id: int):
+        """Mark a paper trade as stuck — outcome UNKNOWN (right-censored observation).
+
+        Use when we've given up polling (e.g. past latest_expiration_time + grace)
+        but Kalshi has not published a result. pnl_cents is set to NULL so the
+        trade is EXCLUDED from win-rate/Sharpe/ML training datasets rather than
+        contaminating them as a false breakeven.
+
+        If Kalshi later publishes a result, a reconciliation script can flip
+        this back to 'settled' — the original outcome data is preserved.
+        """
+        self._conn.execute(
+            """UPDATE paper_trades
+               SET settlement = NULL, pnl_cents = NULL, status = 'stuck',
+                   settled_at = ?, realized_edge = NULL
+               WHERE id = ?""",
+            (time.time(), row_id),
         )
         self._conn.commit()
 

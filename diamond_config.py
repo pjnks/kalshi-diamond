@@ -124,3 +124,21 @@ CTM_MAX_HOUR_ADJ = float(os.getenv("CTM_MAX_HOUR_ADJ", "0.06"))  # Max ±0.06 fr
 CTM_THRESHOLD_FLOOR = float(os.getenv("CTM_THRESHOLD_FLOOR", "0.40"))
 CTM_THRESHOLD_CEIL = float(os.getenv("CTM_THRESHOLD_CEIL", "0.72"))  # Below CRITICAL (0.78)
 CTM_REFRESH_INTERVAL_SEC = int(os.getenv("CTM_REFRESH_INTERVAL_SEC", "300"))  # 5 min DB reload
+
+# ── Kelly Sizing (Sprint 14c, DORMANT) ────────────────────────────
+# Edge-proportional position sizing using Half-Kelly formula.
+# DORMANT until ML shadow model passes validation gates.
+# See src/diamond_kelly.py for full activation runbook.
+# DO NOT flip on without: (a) N >= 500 post-Sprint-11, (b) validated ML model,
+# (c) backtest comparison vs flat tiered sizing, (d) ML edge wired into ENTRY gate.
+KELLY_SIZING_ENABLED = os.getenv("KELLY_SIZING_ENABLED", "false").lower() == "true"
+KELLY_SAFETY_FRACTION = float(os.getenv("KELLY_SAFETY_FRACTION", "0.5"))   # Half-Kelly default
+KELLY_MIN_EDGE_HURDLE = float(os.getenv("KELLY_MIN_EDGE_HURDLE", "0.02"))  # Slippage-adjusted floor
+KELLY_MAX_PER_TRADE = float(os.getenv("KELLY_MAX_PER_TRADE", "0.05"))      # 5% bankroll cap
+
+# ML promotion gate — tightened from Brier<0.25 → <0.05 after Phase B backtest
+# (2026-04-21). Phase B established σ_max=0.05 for the zero-drawdown regime;
+# Brier ≈ σ² so Brier<0.05 maps to σ<0.22, preserving <5% max drawdown.
+# Brier=0.25 corresponds to constant-0.5 prediction (literally random noise).
+KELLY_BRIER_PROMOTION_THRESHOLD = float(os.getenv("KELLY_BRIER_PROMOTION_THRESHOLD", "0.05"))
+KELLY_JACCARD_PROMOTION_THRESHOLD = float(os.getenv("KELLY_JACCARD_PROMOTION_THRESHOLD", "0.70"))

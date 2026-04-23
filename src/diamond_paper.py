@@ -62,6 +62,10 @@ class PaperTradingEngine:
         self._threshold_mgr = threshold_manager
         self._pending_tickers: set[str] = set()  # Race condition guard
         self._lock = asyncio.Lock()
+        # Per-ticker exception strike counter for settlement polling.
+        # After SETTLEMENT_MAX_STRIKES consecutive failures, the ticker is
+        # quarantined and marked 'stuck' to prevent rate-limit-ban loops.
+        self._settlement_strikes: dict[str, int] = {}
 
     async def cancel_orphaned_orders(self):
         """Sweep and cancel resting orders that survived a crash.
@@ -487,7 +491,10 @@ class PaperTradingEngine:
                 cancel_sec = PAPER_CANCEL_SEC_CRITICAL if level == "CRITICAL" else PAPER_CANCEL_SEC_ALERT
                 log.info(f"[PAPER] ⏳ Pending: {ticker} {side} @ {adjusted_price}¢ "
                          f"(GTC order {order_id}, auto-cancel in {cancel_sec}s)")
-                asyncio.ensure_future(self._cancel_after(order_id, row_id, ticker, cancel_sec))
+                # Pass adjusted_price as defensive fallback: if the order fills during
+                # the cancel window but the API response lacks cost fields, we still
+                # record a valid (conservative) fill_price instead of corrupting the row.
+                asyncio.ensure_future(self._cancel_after(order_id, row_id, ticker, cancel_sec, adjusted_price))
 
         except Exception as e:
             log.error(f"[PAPER] Order failed for {ticker}: {e}", exc_info=True)
@@ -505,7 +512,7 @@ class PaperTradingEngine:
                     market_title=f"ORDER FAILED: {ticker} {side} @ {price_cents}¢ — {e}",
                 )
 
-    async def _cancel_after(self, order_id: str, row_id: int, ticker: str, delay_sec: int):
+    async def _cancel_after(self, order_id: str, row_id: int, ticker: str, delay_sec: int, limit_price: int):
         """Cancel a GTC order after delay_sec if still unfilled.
 
         Prediction market alpha decays in seconds. A resting limit order past
@@ -515,6 +522,12 @@ class PaperTradingEngine:
         Safe against aiohttp session recycling: catches ClientError/TimeoutError
         specifically and leaves cleanup to poll_loop. Propagates CancelledError
         for clean shutdown.
+
+        Args:
+            limit_price: the original limit price we placed the GTC at (cents).
+                Used as a defensive fallback for fill_price if the API response
+                lacks the maker/taker cost fields. Kalshi fills at the limit
+                price or better, so this is a conservative estimate.
         """
         import aiohttp
 
@@ -536,12 +549,39 @@ class PaperTradingEngine:
             fill_count = int(float(raw_fill))
 
             if fill_count > 0:
-                # Filled during the wait — record the fill
-                self._store.update_paper_fill(row_id, order_id, None, fill_count, "filled")
-                log.info(f"[PAPER] Fill confirmed during cancel window: {ticker} {fill_count}x")
+                # Filled during the wait — derive fill_price from actual cost.
+                # Kalshi returns total fill cost (not per-contract price), so we
+                # divide by count to get the average fill price in cents.
+                # This is the ONLY correct source of truth: the limit price is
+                # what we bid; maker_fill_cost is what we actually paid.
+                try:
+                    maker_cost = float(order.get("maker_fill_cost_dollars", "0") or "0")
+                    taker_cost = float(order.get("taker_fill_cost_dollars", "0") or "0")
+                    total_cost = maker_cost + taker_cost
+                    if total_cost > 0 and fill_count > 0:
+                        fill_price = int(round(total_cost * 100 / fill_count))
+                    else:
+                        # Cost fields missing or zero — fall back to limit price.
+                        # Kalshi GTCs fill at limit or better, so this is conservative.
+                        fill_price = int(limit_price)
+                        log.warning(
+                            f"[PAPER] Cost fields missing in fill response for {ticker}/{order_id} "
+                            f"(maker={maker_cost}, taker={taker_cost}, count={fill_count}). "
+                            f"Falling back to limit_price={limit_price}¢."
+                        )
+                except (TypeError, ValueError) as parse_err:
+                    fill_price = int(limit_price)
+                    log.warning(
+                        f"[PAPER] Fill price parse error for {ticker}/{order_id}: {parse_err!r}. "
+                        f"Falling back to limit_price={limit_price}¢."
+                    )
+
+                self._store.update_paper_fill(row_id, order_id, fill_price, fill_count, "filled")
+                log.info(f"[PAPER] Fill confirmed during cancel window: {ticker} "
+                         f"{fill_count}x @ {fill_price}¢ (order {order_id})")
                 if PAPER_NOTIFY_TRADES and self._alerts:
                     self._alerts.notify_trade_placed(
-                        ticker=ticker, side="", price=0, title=ticker,
+                        ticker=ticker, side="", price=fill_price, title=ticker,
                     )
                 return
 
@@ -694,48 +734,69 @@ class PaperTradingEngine:
             return False
 
     async def check_settlements(self):
-        """Check if any open positions have settled and compute P&L."""
+        """Check if any open positions have settled and compute P&L.
+
+        Resolution priority (amended for Kalshi API taxonomy drift):
+          1. DATA-DRIVEN — if `result` field is 'yes' or 'no', settle regardless
+             of status string. Kalshi has multiple terminal statuses
+             ('settled', 'finalized', 'closed', 'determined') and this set is
+             evolving; relying on `result` being populated is strictly stronger.
+          2. TERMINAL STATUS — if status is a known void/cancel enum, mark the
+             trade 'voided' with $0 P&L (a known-tie outcome, not censored).
+          3. DYNAMIC TIMEOUT — if now > latest_expiration_time + 24h grace,
+             give up polling and mark 'stuck' (pnl_cents=NULL, right-censored).
+             Uses Kalshi's own per-market deadline rather than a flat heuristic.
+          4. STRIKE QUARANTINE — if the same ticker raises N consecutive
+             exceptions, mark 'stuck' to prevent rate-limit-ban polling loops.
+
+        Exceptions now log at ERROR level with full traceback. The previous
+        log.debug() pattern silently hid real bugs (constraint violations,
+        schema drift, auth failures) for weeks.
+        """
+        SETTLEMENT_MAX_STRIKES = 3
+        TIMEOUT_GRACE_SEC = 24 * 3600  # 24h past latest_expiration_time
+        TERMINAL_VOID_STATUSES = {"voided", "canceled", "cancelled", "refunded"}
+
         open_trades = self._store.get_open_paper_trades()
         if not open_trades:
             return
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
 
         for trade in open_trades:
             ticker = trade["ticker"]
             try:
                 market = await self._rest.get_market(ticker)
-                status = market.get("status", "")
+                status = (market.get("status") or "").lower()
+                result = (market.get("result") or "").lower()
 
-                if status in ("settled", "finalized", "closed"):
-                    # Determine settlement result
-                    result = market.get("result", "")  # "yes" or "no"
-                    if not result:
-                        # Try alternative fields
-                        result = market.get("settlement_value", "")
-                        if not result:
-                            log.warning(f"[PAPER] Market {ticker} settled but no result found")
-                            continue
-
-                    # Compute P&L
+                # ─── 1. DATA-DRIVEN RESOLUTION (primary) ──────────────────
+                if result in ("yes", "no"):
                     fill_price = trade["fill_price"]
                     fill_count = trade["fill_count"]
                     side = trade["side"]
-
-                    if side == "yes":
-                        if result == "yes":
-                            pnl = (100 - fill_price) * fill_count  # Won
-                        else:
-                            pnl = -fill_price * fill_count  # Lost
-                    else:  # side == "no"
-                        if result == "no":
-                            pnl = (100 - fill_price) * fill_count  # Won
-                        else:
-                            pnl = -fill_price * fill_count  # Lost
+                    # Guard against corrupted trades (None fill_price/count from
+                    # pre-migration rows or broken fill-tracking). We CANNOT
+                    # compute P&L without these — mark stuck rather than crash.
+                    if fill_price is None or fill_count is None:
+                        self._store.mark_paper_stuck(trade["id"])
+                        log.error(
+                            f"[PAPER] Cannot settle {ticker}: fill_price={fill_price}, "
+                            f"fill_count={fill_count}. Marked stuck (data corruption; "
+                            f"Kalshi says result={result} but we lack entry data)."
+                        )
+                        self._settlement_strikes.pop(ticker, None)
+                        continue
+                    won = (side == result)
+                    pnl = (100 - fill_price) * fill_count if won else -fill_price * fill_count
 
                     self._store.update_paper_settlement(trade["id"], result, pnl)
                     log.info(f"[PAPER] Settled: {ticker} ({trade['title']}) "
                              f"side={side} result={result} pnl={pnl:+d}¢")
 
-                    # Update dynamic threshold manager with settlement outcome
+                    # Clear strike counter on success
+                    self._settlement_strikes.pop(ticker, None)
+
                     if self._threshold_mgr is not None:
                         opened_at = trade.get("opened_at", 0)
                         entry_hour = int(opened_at / 3600) % 24
@@ -744,15 +805,72 @@ class PaperTradingEngine:
                             utc_hour=entry_hour,
                             won=(pnl > 0),
                         )
-
-                    # Send notification
                     if PAPER_NOTIFY_TRADES and self._alerts:
                         self._alerts.notify_trade_settled(
                             ticker=ticker, pnl_cents=pnl, title=trade.get("title", ticker),
                         )
+                    continue
+
+                # ─── 2. TERMINAL VOID/CANCEL STATUS ───────────────────────
+                if status in TERMINAL_VOID_STATUSES:
+                    self._store.mark_paper_voided(trade["id"])
+                    log.warning(f"[PAPER] Market {ticker} voided by exchange "
+                                f"(status={status}); marked voided, pnl=0.")
+                    self._settlement_strikes.pop(ticker, None)
+                    continue
+
+                # ─── 3. DYNAMIC TIMEOUT (uses Kalshi's latest_expiration_time) ──
+                latest_exp_str = market.get("latest_expiration_time") or ""
+                if latest_exp_str:
+                    try:
+                        # Kalshi returns ISO-8601 with 'Z' suffix; Python 3.11+ handles 'Z'
+                        latest_exp = datetime.datetime.fromisoformat(
+                            latest_exp_str.replace("Z", "+00:00")
+                        )
+                        cutoff = latest_exp + datetime.timedelta(seconds=TIMEOUT_GRACE_SEC)
+                        if now_utc > cutoff:
+                            self._store.mark_paper_stuck(trade["id"])
+                            log.error(
+                                f"[PAPER] STUCK: {ticker} past latest_expiration_time "
+                                f"({latest_exp_str}) + 24h grace; status={status}, "
+                                f"result={result!r}. Marked stuck (pnl=NULL, right-censored)."
+                            )
+                            self._settlement_strikes.pop(ticker, None)
+                            continue
+                    except (ValueError, TypeError) as e:
+                        log.warning(f"[PAPER] Could not parse latest_expiration_time "
+                                    f"{latest_exp_str!r} for {ticker}: {e}")
+
+                # Still genuinely pending — no action this cycle.
+                # Clear strike counter since the API call succeeded.
+                self._settlement_strikes.pop(ticker, None)
 
             except Exception as e:
-                log.debug(f"[PAPER] Error checking settlement for {ticker}: {e}")
+                # Bumped from log.debug() — swallowing settlement failures at
+                # debug level hid systematic bugs for weeks. Always surface.
+                strikes = self._settlement_strikes.get(ticker, 0) + 1
+                self._settlement_strikes[ticker] = strikes
+                log.error(
+                    f"[PAPER] Settlement check failed for {ticker} "
+                    f"(strike {strikes}/{SETTLEMENT_MAX_STRIKES}): {e}",
+                    exc_info=True,
+                )
+                # Quarantine chronic failers — prevents rate-limit-ban loops
+                # when a single malformed market poisons the whole poll cycle.
+                if strikes >= SETTLEMENT_MAX_STRIKES:
+                    try:
+                        self._store.mark_paper_stuck(trade["id"])
+                        log.error(
+                            f"[PAPER] QUARANTINED: {ticker} hit "
+                            f"{SETTLEMENT_MAX_STRIKES} consecutive exceptions; "
+                            f"marked stuck to halt polling."
+                        )
+                        self._settlement_strikes.pop(ticker, None)
+                    except Exception as inner:
+                        log.error(
+                            f"[PAPER] Failed to quarantine {ticker}: {inner}",
+                            exc_info=True,
+                        )
 
     async def check_pending_fills(self):
         """Check if any pending orders have been filled or expired.
