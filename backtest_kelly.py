@@ -19,7 +19,8 @@ Statistical framework:
 Usage:
   python backtest_kelly.py --phase A
   python backtest_kelly.py --phase B --sigmas 0.01,0.02,0.05,0.10
-  python backtest_kelly.py --phase C --min-active-n 10 --bootstrap 10000
+  python backtest_kelly.py --phase C --bootstrap 10000                 # shrunk (default)
+  python backtest_kelly.py --phase C --no-shrink --bootstrap 10000     # legacy (-$477 tombstone)
 
 Outputs: JSON report + CSV per-trade ledger.
 """
@@ -41,6 +42,7 @@ import numpy as np
 # ── DIAMOND imports ──────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from src.diamond_kelly import kelly_contracts, KellyAllocation
+from src.diamond_shrinkage import shrunk_wr, prior_strength_default
 
 DB_PATH = Path(__file__).parent / "diamond_trades.db"
 
@@ -236,6 +238,73 @@ def pit_bucket_edge_factory(
     def _lookup(trade: SimTrade, *, cohort=None) -> Optional[float]:
         return edges.get(trade.trade_id)
 
+    return _lookup, warmup_skip_ids
+
+
+def pit_bucket_edge_shrunk_factory(
+    cohort: list[SimTrade],
+    prior_strength_fn=prior_strength_default,
+) -> tuple[Callable[..., Optional[float]], set[int]]:
+    """Phase C Shrunk: Bayesian-shrunk bucket edge.
+
+    Drop-in replacement for pit_bucket_edge_factory that applies Laplace
+    shrinkage toward the market-implied prior (p = entry_price/100) before
+    returning an edge. See src/diamond_shrinkage.py for the math.
+
+    Key difference from naive factory: at low-N (or N=0), the shrunk WR
+    collapses toward the market prior, producing near-zero edge. The
+    15-24¢ steamroller (wins=2, n=5, p=0.20) returns a shrunk edge of
+    +0.032, well below the Kelly hurdle. The min_active_n hard cutoff
+    was retired 2026-04-21 after ablation proved shrinkage handles
+    warmup dynamically — the math replaces the step-function heuristic.
+
+    Returns (edge_fn, warmup_skip_ids). The warmup_skip_ids set is empty
+    (kept in signature for API compatibility with the naive factory) —
+    shrinkage evaluates every trade, letting k = 20 + 3√N taper the
+    allocation smoothly from 0 to f* as sample size accumulates.
+    """
+    bucket_prior: dict[tuple[int, int], list[tuple[float, bool]]] = {}
+    for t in sorted(cohort, key=lambda t: t.settled_at):
+        bucket = price_bucket_cents(t.entry_price)
+        won = t.pnl_per_contract > 0
+        bucket_prior.setdefault(bucket, []).append((t.settled_at, won))
+
+    edges: dict[int, Optional[float]] = {}
+    warmup_skip_ids: set[int] = set()  # always empty — shrinkage is the warmup handler
+    naive_vs_shrunk: list[dict] = []  # diagnostic telemetry
+
+    for arriving in sorted(cohort, key=lambda t: t.opened_at):
+        bucket = price_bucket_cents(arriving.entry_price)
+        observable = [
+            (ts, won) for (ts, won) in bucket_prior.get(bucket, [])
+            if ts < arriving.opened_at
+        ]
+        n = len(observable)
+        wins = sum(1 for _, w in observable if w)
+        p_market = arriving.entry_price / 100.0
+        k = prior_strength_fn(n, p_market)
+        est = shrunk_wr(wins, n, p_market, k)
+        edges[arriving.trade_id] = est.edge
+
+        # Record diagnostics for post-hoc analysis of how much phantom edge
+        # the shrinkage deflated away.
+        if abs(est.naive_edge - est.edge) > 0.05:
+            naive_vs_shrunk.append({
+                "trade_id": arriving.trade_id,
+                "bucket": bucket,
+                "n": n, "wins": wins,
+                "naive_edge": round(est.naive_edge, 4),
+                "shrunk_edge": round(est.edge, 4),
+                "deflation": round(est.naive_edge - est.edge, 4),
+            })
+
+    print(f"PiT shrunk edges: {len(edges)} trades (shrinkage-as-warmup; no hard cutoff), "
+          f"{len(naive_vs_shrunk)} trades had >5pp phantom edge deflated")
+
+    def _lookup(trade: SimTrade, *, cohort=None) -> Optional[float]:
+        return edges.get(trade.trade_id)
+
+    _lookup.naive_vs_shrunk = naive_vs_shrunk  # type: ignore[attr-defined]
     return _lookup, warmup_skip_ids
 
 
@@ -507,17 +576,28 @@ def run_phase_b(cohort: list[SimTrade], sigmas: list[float]) -> dict:
 
 def run_phase_c(
     cohort: list[SimTrade],
-    min_active_n: int = 10,
     n_bootstrap: int = 1000,
+    shrink: bool = True,
 ) -> dict:
     """Phase C: PiT empirical bucket edge — lower bound on real Kelly advantage.
 
-    N-matching invariant (fix 2026-04-21): warmup trades (bucket N < min_active_n)
-    return None from edge_fn. These MUST be excluded from BOTH Kelly and Flat
-    before metric comparison, else Kelly runs on a different universe than Flat
-    and the comparison is meaningless (survival-bias trap).
+    Default (shrink=True, since 2026-04-21): Bayesian-shrunk bucket edge with
+    k = 20 + 3√N pseudocount. No hard warmup cutoff — shrinkage handles the
+    low-N regime dynamically by collapsing the edge toward zero.
+
+    Legacy (shrink=False): naive bucket WR with min_active_n=10 hard cutoff.
+    Retained for historical reproducibility of the -$477/55% DD result that
+    motivated the shrinkage work. DO NOT use for forward decisions.
+
+    N-matching invariant: warmup skips (only meaningful in the legacy naive
+    path) are excluded from BOTH Kelly and Flat cohorts before comparison.
     """
-    edge_fn, warmup_skip_ids = pit_bucket_edge_factory(cohort, min_active_n=min_active_n)
+    if shrink:
+        edge_fn, warmup_skip_ids = pit_bucket_edge_shrunk_factory(cohort)
+        edge_label = "kelly_shrunk_bucket"
+    else:
+        edge_fn, warmup_skip_ids = pit_bucket_edge_factory(cohort, min_active_n=10)
+        edge_label = "kelly_naive_bucket_legacy"
 
     # Matched cohort: exclude ONLY the trades where Kelly can't decide (warmup).
     # Kelly still legitimately skips trades where edge < hurdle on the matched set;
@@ -545,6 +625,7 @@ def run_phase_c(
 
     return {
         "phase": "C",
+        "edge_estimator": edge_label,
         "cohort_size_total": len(cohort),
         "cohort_size_matched": len(matched_cohort),
         "warmup_dropped": len(warmup_skip_ids),
@@ -577,8 +658,11 @@ def main() -> int:
     parser.add_argument("--db", default=str(DB_PATH))
     parser.add_argument("--since", default="2026-04-02")
     parser.add_argument("--sigmas", default="0.01,0.02,0.05,0.10")
-    parser.add_argument("--min-active-n", type=int, default=10)
     parser.add_argument("--bootstrap", type=int, default=1000)
+    parser.add_argument("--no-shrink", action="store_true",
+                        help="Phase C: use legacy naive bucket WR with min_active_n=10 "
+                             "cutoff (for reproducing the pre-shrinkage -$477/55%% DD "
+                             "tombstone result only; DO NOT use for forward decisions)")
     args = parser.parse_args()
 
     cohort = load_cohort(Path(args.db), opened_since=args.since)
@@ -593,8 +677,8 @@ def main() -> int:
     if args.phase in ("C", "all"):
         reports["C"] = run_phase_c(
             cohort,
-            min_active_n=args.min_active_n,
             n_bootstrap=args.bootstrap,
+            shrink=not args.no_shrink,
         )
 
     print(json.dumps(reports, indent=2, default=str))

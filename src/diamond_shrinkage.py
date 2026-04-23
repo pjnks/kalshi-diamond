@@ -186,24 +186,32 @@ variance" prior requires higher k at extreme prices.
 
 
 def prior_strength_default(observed_n: int, prior_mean: float) -> float:
-    """Default prior-strength function. **TODO: USER CONTRIBUTION.**
+    """Option B: derived-floor pseudocount = k_base + α·√N.
 
-    Args:
-        observed_n: Number of observations in this bucket/category.
-        prior_mean: Market-implied prior probability (entry_price/100).
+    Calibrated (2026-04-21) from the Phase C 15-24¢ steamroller geometry:
+      shrunk_edge(wins=2, n=5, p=0.20, k) = (W - N·p) / (N + k) = 1/(5+k)
+      Half-Kelly safety cap requires edge ≤ 0.04 → k ≥ 20. Picking k_base=20
+      is the *analytical minimum* that squashes a 1σ noise event at N=5
+      below the 5% per-trade allocation cap — not a heuristic.
 
-    Returns:
-        Pseudocount k for `shrunk_wr()`.
+    The α·√N term preserves a skepticism floor even on high-N buckets:
+      - At N=0:   k=20 (pure steamroller protection)
+      - At N=25:  k=35 (prior weight ~58%)
+      - At N=100: k=50 (prior weight ~33%)
+      - At N=400: k=80 (prior weight ~17%)
+    The √N decay is isomorphic to the standard error of a proportion, so
+    prior weight fades in lockstep with the data's statistical precision —
+    mathematically principled Empirical Bayes.
 
-    Recommended starting point: see OPTION A/B/C/D above. Pick one and
-    encode your reasoning in the docstring. We'll validate empirically.
+    Risk register (documented 2026-04-21): at N=400 the prior still holds
+    ~16% weight. If a bucket's true regime shifts, the anchor will cause the
+    estimator to lag the new reality. Acceptable trade-off for backtest use;
+    when a Brier<0.05 ML edge source is live, α can be lowered because the
+    model's intrinsic calibration assumes the burden of risk-aversion.
     """
-    # TODO — replace this placeholder with your chosen strategy.
-    raise NotImplementedError(
-        "Pick a prior_strength strategy (Options A-D in the docstring) and "
-        "implement it here. See the Learning-mode request in the session "
-        "transcript for guidance on the trade-offs."
-    )
+    k_base = 20.0
+    alpha = 3.0
+    return k_base + (alpha * math.sqrt(observed_n))
 
 
 # ── Convenience wrappers for the two main callers ────────────────────────

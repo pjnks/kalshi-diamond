@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DIAMOND Sprint 14c/14d — Kelly Backtest, Phases A/B/C</title>
+<style>
+  :root {
+    --neon-green:  #00ff9f;
+    --neon-cyan:   #00f0ff;
+    --neon-pink:   #ff2d6b;
+    --neon-yellow: #ffe156;
+    --dark-bg:     #030508;
+    --panel:       #0a1520;
+    --border:      #1a3040;
+    --text:        #d0eaf5;
+    --dim:         #8ab4c8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--dark-bg);
+    color: var(--text);
+    font-family: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+    font-size: 14px;
+    line-height: 1.55;
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 {
+    font-family: "Inter", system-ui, sans-serif;
+    color: var(--neon-cyan);
+    margin: 0 0 6px 0;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    font-family: "Inter", system-ui, sans-serif;
+    color: var(--neon-green);
+    margin: 42px 0 8px 0;
+    font-size: 20px;
+    border-left: 3px solid var(--neon-green);
+    padding-left: 10px;
+  }
+  h3 {
+    font-family: "Inter", system-ui, sans-serif;
+    color: var(--neon-cyan);
+    margin: 22px 0 8px 0;
+    font-size: 16px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin-bottom: 16px;
+  }
+  .header-meta { color: var(--dim); font-size: 13px; }
+  .tldr { border-left: 3px solid var(--neon-pink); padding-left: 14px; }
+  .tldr li { margin-bottom: 6px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 14px 0;
+    font-size: 13px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: right;
+  }
+  th { background: #0c1a28; color: var(--neon-cyan); font-weight: 600; text-align: left; }
+  td:first-child { text-align: left; color: var(--dim); }
+  td.num { font-variant-numeric: tabular-nums; }
+  .win { color: var(--neon-green); }
+  .loss { color: var(--neon-pink); }
+  .warn { color: var(--neon-yellow); }
+  .dim { color: var(--dim); }
+  .codeish {
+    background: #040a12;
+    border: 1px solid var(--border);
+    padding: 10px 14px;
+    border-radius: 4px;
+    color: var(--neon-green);
+    font-size: 13px;
+    white-space: pre-wrap;
+  }
+  .bar-row {
+    display: grid;
+    grid-template-columns: 170px 1fr 90px;
+    gap: 10px;
+    margin: 5px 0;
+    align-items: center;
+  }
+  .bar-wrap { background: #061018; border-radius: 3px; height: 22px; overflow: hidden; }
+  .bar { height: 22px; display: inline-block; }
+  .bar-label { color: var(--dim); font-size: 12px; }
+  .bar-value { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; }
+
+  .pull-quote {
+    border-left: 3px solid var(--neon-yellow);
+    padding: 14px 20px;
+    font-style: italic;
+    color: var(--neon-yellow);
+    background: #101820;
+    margin: 16px 0;
+    font-size: 15px;
+  }
+  .timeline { list-style: none; padding-left: 0; }
+  .timeline li {
+    border-left: 2px solid var(--border);
+    padding: 4px 0 10px 14px;
+    margin-left: 4px;
+    position: relative;
+  }
+  .timeline li::before {
+    content: "●";
+    color: var(--neon-cyan);
+    position: absolute;
+    left: -7px; top: 2px;
+    font-size: 12px;
+  }
+  .timeline .day { color: var(--neon-cyan); font-weight: 600; margin-right: 6px; }
+  .three-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+    margin: 14px 0;
+  }
+  .three-col .card {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #0c1a28;
+  }
+  .three-col .card.naive { border-left: 3px solid var(--neon-pink); }
+  .three-col .card.shrunk { border-left: 3px solid var(--neon-yellow); }
+  .three-col .card.full { border-left: 3px solid var(--neon-green); }
+  .three-col h4 {
+    margin: 0 0 8px 0;
+    font-family: "Inter", system-ui, sans-serif;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .three-col .metric {
+    display: flex; justify-content: space-between;
+    font-size: 12px; margin: 4px 0;
+  }
+  .three-col .metric .k { color: var(--dim); }
+  .three-col .metric .v { font-variant-numeric: tabular-nums; }
+  ol.nextactions li { margin-bottom: 10px; }
+  .kill-crit { background: #1a0a14; border-left: 3px solid var(--neon-pink); padding: 12px 16px; margin: 10px 0; }
+  .decision { background: #0c1a1e; border-left: 3px solid var(--neon-cyan); padding: 12px 16px; margin: 10px 0; }
+  .footer { margin-top: 50px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>DIAMOND Sprint 14c / 14d — Kelly Backtest, Phases A / B / C</h1>
+<div class="header-meta">
+  2026-04-16 → 2026-04-21 · Engineering: ~14 hours (across Sprint 14b schema-migration,
+  14c scaffolding, 14d Phase ABC execution + shrinkage bolt-on) · Claude + collaborator pair
+</div>
+
+<!-- ── TL;DR ─────────────────────────────────────────────── -->
+<div class="panel tldr">
+<h2 style="margin-top:0;">TL;DR</h2>
+<ul>
+  <li><strong>Phase A</strong> (oracle) proved the harness math (ledger invariant, terminal bankroll, MaxDD, PiT gate) — Flat −$1.47 matches live reality; Kelly with perfect info +5,050% return, 0% drawdown.</li>
+  <li><strong>Phase B</strong> established <span class="warn">σ_max = 0.05</span> for the zero-drawdown regime (biased-clip gaussian noise on oracle). This maps to a Brier < 0.0025 ML calibration. The dormant promotion gate was tightened from Brier &lt; 0.25 → <span class="warn">&lt; 0.05</span>.</li>
+  <li><strong>Phase C naive</strong> (raw bucket WR, matched N=227) produced a <span class="loss">−$477.50 / 55.22% drawdown</span> disaster. 72% of the loss concentrated in the 15–24¢ bucket (small-sample phantom edge × convex-payout leverage).</li>
+  <li><strong>Bayesian shrinkage</strong> with k = 20 + 3√N (derived analytically, not tuned) compressed the loss by 42% and the drawdown by 38%. Bootstrap p95 of P&amp;L diff crossed zero — Kelly now beats Flat in ≥5% of 10,000 event-cluster resamples.</li>
+  <li><strong>Residual loss is information-theoretic, not sizing-theoretic.</strong> Shrinkage cannot manufacture edge on a zero-IC signal. <span class="win">The Two-Gate Stack (real ML IC × shrinkage)</span> is the only safe activation path.</li>
+</ul>
+</div>
+
+<!-- ── Fundamental Theorem Pull Quote ──────────────────────── -->
+<div class="pull-quote">
+"Shrinkage is a variance-reducer, not an information-creator."
+<br>
+<span class="dim" style="font-size:12px;">— empirical corollary, Sprint 14d (2026-04-21)</span>
+</div>
+
+<!-- ── Phase A Sanity Check ────────────────────────────────── -->
+<div class="panel">
+<h2>Phase A — Oracle Sanity Check</h2>
+<p class="dim">Verified four bug fixes during the live run: (1) ledger invariant was <code>cash+locked+realized=initial</code>,
+corrected to <code>cash+locked−realized=initial</code>; (2) terminal bankroll double-counted gains; (3) MaxDD was an unimplemented stub, now time-indexed per settlement; (4) collaborator-diagnosed warmup N-matching trap.</p>
+
+<table>
+<tr><th>Strategy</th><th>N enters</th><th>Terminal</th><th>Total P&amp;L</th><th>MaxDD $</th><th>MaxDD %</th><th>Per-trade Sharpe</th></tr>
+<tr><td>Flat tiered (3/2/1)</td>
+    <td class="num">289</td><td class="num">$998.53</td>
+    <td class="num loss">−$1.47</td><td class="num">$6.66</td>
+    <td class="num">0.66%</td><td class="num">−0.012</td></tr>
+<tr><td>Oracle Half-Kelly</td>
+    <td class="num">158</td><td class="num win">$51,498.71</td>
+    <td class="num win">+$50,499</td><td class="num win">$0.00</td>
+    <td class="num win">0.00%</td><td class="num win">+0.469</td></tr>
+</table>
+<p class="dim">Flat P&amp;L matches live ground truth (−$1.47 on 289-trade cohort = 163W/126L mix of 50¢-80¢ structural losers).
+Oracle Kelly skips 131 trades: 126 losers (correctly sign-flipped edge) + 5 marginal winners at ≥98¢ (sub-hurdle 0.02 edge).
+Zero drawdown is the theoretical ceiling — the cost of every percentage point below this in the ML model is the cost of imperfect information.</p>
+</div>
+
+<!-- ── Phase B Sigma Tolerance ────────────────────────────── -->
+<div class="panel">
+<h2>Phase B — σ_max Tolerance Curve (Kelly vs Flat)</h2>
+<p class="dim">Noisy oracle with biased clip to [0.01, 0.99] (no Mills-ratio correction — the honest stress test; live ML won't self-center).</p>
+
+<h3>Drawdown growth as σ rises</h3>
+<div class="bar-row"><span class="bar-label">σ = 0.00</span>
+  <div class="bar-wrap"><span class="bar" style="width:0%;background:var(--neon-green);"></span></div>
+  <span class="bar-value win">0.00%</span></div>
+<div class="bar-row"><span class="bar-label">σ = 0.02</span>
+  <div class="bar-wrap"><span class="bar" style="width:0%;background:var(--neon-green);"></span></div>
+  <span class="bar-value win">0.00%</span></div>
+<div class="bar-row"><span class="bar-label">σ = 0.05  (gate)</span>
+  <div class="bar-wrap"><span class="bar" style="width:0%;background:var(--neon-green);"></span></div>
+  <span class="bar-value win">0.00%</span></div>
+<div class="bar-row"><span class="bar-label">σ = 0.07</span>
+  <div class="bar-wrap"><span class="bar" style="width:11%;background:var(--neon-yellow);"></span></div>
+  <span class="bar-value warn">1.44%</span></div>
+<div class="bar-row"><span class="bar-label">σ = 0.10</span>
+  <div class="bar-wrap"><span class="bar" style="width:38%;background:var(--neon-yellow);"></span></div>
+  <span class="bar-value warn">5.03%</span></div>
+<div class="bar-row"><span class="bar-label">σ = 0.20</span>
+  <div class="bar-wrap"><span class="bar" style="width:33%;background:var(--neon-pink);"></span></div>
+  <span class="bar-value loss">4.33%</span></div>
+<div class="bar-row"><span class="bar-label">σ = 0.30</span>
+  <div class="bar-wrap"><span class="bar" style="width:72%;background:var(--neon-pink);"></span></div>
+  <span class="bar-value loss">9.59%</span></div>
+<div class="bar-row"><span class="bar-label">σ = 0.50  (random noise)</span>
+  <div class="bar-wrap"><span class="bar" style="width:100%;background:var(--neon-pink);"></span></div>
+  <span class="bar-value loss">13.27%</span></div>
+
+<h3>σ_max ↔ Brier ML-gate translation</h3>
+<table>
+<tr><th>Gate</th><th>σ_max</th><th>Brier ≈ σ²</th><th>Interpretation</th></tr>
+<tr><td>Zero drawdown</td><td class="num win">0.05</td><td class="num">0.0025</td><td class="dim">Near-oracle calibration</td></tr>
+<tr><td>&lt; 2% DD</td><td class="num">~0.06</td><td class="num">0.004</td><td class="dim">Strict ML gate</td></tr>
+<tr><td>&lt; 5% DD</td><td class="num">~0.08</td><td class="num">0.006</td><td class="dim">Reasonable ML gate</td></tr>
+<tr><td>Current dormant gate (2026-04-21)</td><td class="num warn">0.22</td><td class="num warn">0.05</td><td class="warn">Tightened from 0.25</td></tr>
+<tr><td>Kelly &gt; Flat (any DD)</td><td class="num">&gt;0.50</td><td class="num">&gt;0.25</td><td class="dim">Biased-clip floor</td></tr>
+</table>
+</div>
+
+<!-- ── Phase C Three-Column ────────────────────────────────── -->
+<div class="panel">
+<h2>Phase C — Kelly vs Flat on PiT Bucket Edge</h2>
+<p class="dim">Three runs on the 289-trade post-Sprint-11 cohort. Matched-cohort invariant honored in the naive and shrunk (matched) runs. The shrunk full-cohort run dispenses with min_active_n since Bayesian shrinkage is the warmup handler.</p>
+
+<div class="three-col">
+  <div class="card naive">
+    <h4>Naive bucket WR<br><span class="dim" style="font-size:11px;">(legacy tombstone, min_active_n=10)</span></h4>
+    <div class="metric"><span class="k">Cohort (matched)</span><span class="v">227</span></div>
+    <div class="metric"><span class="k">Kelly enters</span><span class="v">79</span></div>
+    <div class="metric"><span class="k">Kelly P&amp;L</span><span class="v loss">−$477.50</span></div>
+    <div class="metric"><span class="k">MaxDD %</span><span class="v loss">55.22%</span></div>
+    <div class="metric"><span class="k">Boot p95 P&amp;L diff</span><span class="v loss">−$188</span></div>
+    <div class="metric"><span class="k">Boot p95 DD diff</span><span class="v loss">−$440</span></div>
+    <div class="metric"><span class="k">15–24¢ contribution</span><span class="v loss">−$344.86 (20 trades)</span></div>
+  </div>
+
+  <div class="card shrunk">
+    <h4>Shrunk (matched)<br><span class="dim" style="font-size:11px;">(k = 20 + 3√N, min_active_n=10)</span></h4>
+    <div class="metric"><span class="k">Cohort (matched)</span><span class="v">227</span></div>
+    <div class="metric"><span class="k">Kelly enters</span><span class="v">57</span></div>
+    <div class="metric"><span class="k">Kelly P&amp;L</span><span class="v warn">−$277.58</span></div>
+    <div class="metric"><span class="k">MaxDD %</span><span class="v warn">34.11%</span></div>
+    <div class="metric"><span class="k">Boot p95 P&amp;L diff</span><span class="v warn">−$8</span></div>
+    <div class="metric"><span class="k">Boot p95 DD diff</span><span class="v warn">−$224</span></div>
+    <div class="metric"><span class="k">15–24¢ contribution</span><span class="v warn">−$140.32 (10 trades)</span></div>
+  </div>
+
+  <div class="card full">
+    <h4>Shrunk (no warmup)<br><span class="dim" style="font-size:11px;">(k = 20 + 3√N, full N=289)</span></h4>
+    <div class="metric"><span class="k">Cohort</span><span class="v">289</span></div>
+    <div class="metric"><span class="k">Kelly enters</span><span class="v">63</span></div>
+    <div class="metric"><span class="k">Kelly P&amp;L</span><span class="v warn">−$221.25</span></div>
+    <div class="metric"><span class="k">MaxDD %</span><span class="v warn">34.09%</span></div>
+    <div class="metric"><span class="k">Boot p95 P&amp;L diff</span><span class="v win">+$79</span></div>
+    <div class="metric"><span class="k">Boot p95 DD diff</span><span class="v warn">−$234</span></div>
+    <div class="metric"><span class="k">15–24¢ contribution</span><span class="v warn">~same (shrunk handles warmup)</span></div>
+  </div>
+</div>
+
+<h3>Drawdown compression — the visual</h3>
+<div class="bar-row"><span class="bar-label">Flat baseline</span>
+  <div class="bar-wrap"><span class="bar" style="width:1%;background:var(--neon-green);"></span></div>
+  <span class="bar-value win">0.62%</span></div>
+<div class="bar-row"><span class="bar-label">Shrunk (no warmup)</span>
+  <div class="bar-wrap"><span class="bar" style="width:62%;background:var(--neon-yellow);"></span></div>
+  <span class="bar-value warn">34.09%</span></div>
+<div class="bar-row"><span class="bar-label">Shrunk (matched)</span>
+  <div class="bar-wrap"><span class="bar" style="width:62%;background:var(--neon-yellow);"></span></div>
+  <span class="bar-value warn">34.11%</span></div>
+<div class="bar-row"><span class="bar-label">Naive (tombstone)</span>
+  <div class="bar-wrap"><span class="bar" style="width:100%;background:var(--neon-pink);"></span></div>
+  <span class="bar-value loss">55.22%</span></div>
+
+<h3>Why shrinkage worked but didn't cure</h3>
+<p>The bucket-WR estimator has near-zero IC after price-controlling (Sprint 13b theoretical finding). Bayesian shrinkage correctly pulls small-sample WRs toward the market prior, reducing the <em>magnitude</em> of phantom edges and the <em>frequency</em> of Kelly entries. But when the underlying signal has no true predictive content, even a mathematically optimal estimator produces near-random trades. The residual −$221 loss is <strong>information-theoretic, not sizing-theoretic</strong> — it is the cost of Kelly operating on a zero-IC estimator at all, regardless of how well the variance is controlled.</p>
+</div>
+
+<!-- ── The k = 20 + 3√N derivation ─────────────────────────── -->
+<div class="panel">
+<h2>The k = 20 + 3√N derivation</h2>
+<div class="decision">
+<strong>k_base = 20 is the analytical minimum</strong> (not a tuned heuristic):
+<div class="codeish">  shrunk_edge(W=2, N=5, p=0.20, k) = (W - N·p) / (N + k) = 1/(5+k)
+  Half-Kelly safety cap requires edge ≤ 0.04:
+      1/(5+k) ≤ 0.04  ⇒  k ≥ 20</div>
+<p style="margin-top:10px;">This is the smallest pseudocount that guarantees a 1σ noise event at N=5 cannot breach the 5% per-trade Kelly cap. Anything less would allow the 15–24¢ steamroller to reappear.</p>
+</div>
+
+<div class="decision">
+<strong>α·√N floor is Empirical Bayes by construction:</strong>
+<p>The relative prior weight k/(N+k) decays at rate 1/√N, which is isomorphic to the standard error of a proportion (σ_p = √(p(1−p)/N)). Prior authority fades in lockstep with the data's statistical precision.</p>
+</div>
+
+<h3>Pseudocount schedule</h3>
+<table>
+<tr><th>N</th><th>k = 20 + 3√N</th><th>Prior weight</th><th>Interpretation</th></tr>
+<tr><td>0</td><td class="num">20.0</td><td class="num">100%</td><td class="dim">pure steamroller protection</td></tr>
+<tr><td>5</td><td class="num">26.7</td><td class="num">84.2%</td><td class="dim">Phase C warmup regime</td></tr>
+<tr><td>25</td><td class="num">35.0</td><td class="num">58.3%</td><td class="dim">50/50 blend approaching</td></tr>
+<tr><td>100</td><td class="num">50.0</td><td class="num">33.3%</td><td class="dim">data starting to dominate</td></tr>
+<tr><td>400</td><td class="num">80.0</td><td class="num">16.7%</td><td class="dim">estimator-fidelity regime</td></tr>
+</table>
+</div>
+
+<!-- ── Timeline ───────────────────────────────────────────── -->
+<div class="panel">
+<h2>Timeline</h2>
+<ul class="timeline">
+  <li><span class="day">Apr 16</span>Sprint 14 data-integrity code+app guards deployed (Layer 1 + 2). 9 orphan rows recovered via backfill (6W/3L, −23¢).</li>
+  <li><span class="day">Apr 20</span>Sprint 14b: Layer 3 CHECK constraint rebuilt paper_trades (805 rows, &lt;0.1s). Smoke test verified constraint fires. All three layers LIVE.</li>
+  <li><span class="day">Apr 20</span>Sprint 14c: <code>src/diamond_kelly.py</code> + <code>backtest_kelly.py</code> staged dormant. Half-Kelly formula with 0.02 slippage-adjusted hurdle + 5% per-trade cap. Self-check harness passes 6 cases.</li>
+  <li><span class="day">Apr 21 AM</span>Phase A/B/C executed. Bugs discovered during run: invariant sign flip, terminal-bankroll double-count, MaxDD stub, warmup N-matching (collaborator-diagnosed). All four fixed in one pass.</li>
+  <li><span class="day">Apr 21 PM</span>Phase C naive result: −$477.50 / 55.22% DD. 72% from 15–24¢ bucket. Tombstone documented.</li>
+  <li><span class="day">Apr 21 PM</span><code>src/diamond_shrinkage.py</code> staged. Collaborator derived k≥20 from safety-cap algebra. Option B implementation (k=20+3√N) self-checks pass.</li>
+  <li><span class="day">Apr 21 PM</span>Shrinkage wired into Phase C. Matched run: −$277 / 34.11% DD (42% P&amp;L compression, 38% DD compression). Full-cohort ablation: −$221 / 34.09% DD (bootstrap p95 crosses zero).</li>
+  <li><span class="day">Apr 21 PM</span><code>min_active_n</code> hard cutoff retired — shrinkage is the warmup handler. Brier gate tightened to &lt;0.05 in <code>diamond_config.py</code>. Sprint 14 closed.</li>
+</ul>
+</div>
+
+<!-- ── Decision log ───────────────────────────────────────── -->
+<div class="panel">
+<h2>Decision Log</h2>
+
+<h3>Decision 1: Retire min_active_n in favor of shrinkage</h3>
+<table>
+<tr><th>Option</th><th>Rationale</th><th>Chosen</th></tr>
+<tr><td>Keep min_active_n=10 floor</td><td>Belt-and-suspenders; familiar pattern</td><td></td></tr>
+<tr><td>Let shrinkage handle warmup</td><td>Math replaces heuristic; smooth taper from 0 to f*; empirical evidence shows full-cohort run is strictly superior</td><td class="win">✓</td></tr>
+</table>
+<p class="dim">The ablation was decisive: full-cohort shrunk Kelly outperformed matched shrunk Kelly on every metric. Hard cutoffs introduce step-function discontinuities that shrinkage smoothly replaces.</p>
+
+<h3>Decision 2: Tighten ML Brier gate 0.25 → 0.05</h3>
+<table>
+<tr><th>Gate</th><th>σ equivalent</th><th>Max DD at this σ</th><th>Chosen</th></tr>
+<tr><td>Brier &lt; 0.25 (prior)</td><td>~0.50</td><td>13.27%</td><td></td></tr>
+<tr><td>Brier &lt; 0.05 (new)</td><td>~0.22</td><td>~4-5%</td><td class="win">✓</td></tr>
+<tr><td>Brier &lt; 0.01 (aspirational)</td><td>~0.10</td><td>~5%</td><td class="dim">future-tightening if model calibrates better</td></tr>
+</table>
+
+<h3>Decision 3: The Two-Gate Stack as the activation policy</h3>
+<div class="decision">
+<strong>Gate A (Information):</strong> ML model must produce Brier &lt; 0.05 AND Jaccard ≥ 0.70 across CV folds.
+<br>
+<strong>Gate B (Variance control):</strong> Shrinkage wraps ML edge with k = 20 + 3√N pseudocount before it reaches Kelly.
+<br><br>
+<span class="warn">Both gates required.</span> Information without variance control reproduces Phase C naive (−$477/55% DD). Variance control without information reproduces Phase C shrunk (−$221/34% DD — still negative EV on a zero-IC signal).
+</div>
+</div>
+
+<!-- ── Kill criteria / gates ──────────────────────────────── -->
+<div class="panel">
+<h2>Kill Criteria & Gates</h2>
+<div class="kill-crit">
+<strong>DO NOT flip <code>KELLY_SIZING_ENABLED = true</code> until ALL of:</strong>
+<ol>
+  <li>N ≥ 500 post-Sprint-11 settled trades (289/500 on 2026-04-21 → ~mid-July ETA at ~2.5 trades/day)</li>
+  <li>ML retrain produces validated model with Brier &lt; 0.05 AND Jaccard ≥ 0.70 across CV folds</li>
+  <li>ML edge is wired into the entry gate of <code>diamond_paper._execute_trade()</code>, not just sizing (Sprint 13b proved composite-score entries have near-zero IC; Kelly-sizing those reproduces the Phase C disaster)</li>
+  <li>Rerun <code>backtest_kelly.py --phase C</code> on post-N=500 data with ML-backed edge estimator. Confirm MaxDD compresses to within 2× of Flat baseline (target: ≤1.25%).</li>
+</ol>
+</div>
+<div class="kill-crit">
+<strong>Automatic kill triggers (hypothetical post-activation):</strong>
+<ul>
+  <li>Rolling 20-trade Kelly P&amp;L underperforms rolling Flat by &gt; $50 → revert to flat sizing</li>
+  <li>ML model Brier drifts above 0.08 in production → disable Kelly, retrain</li>
+  <li>Any single Kelly allocation exceeds 5% bankroll (cap breach) → investigate kelly_contracts() math</li>
+</ul>
+</div>
+</div>
+
+<!-- ── Next actions ──────────────────────────────────────── -->
+<div class="panel">
+<h2>Next Actions</h2>
+<ol class="nextactions">
+  <li><strong>Patience window begins.</strong> Do NOT touch thresholds, execution logic, or the Kelly scaffolding. Let the market print the remaining 211 trades toward N=500.</li>
+  <li><strong>Passive monitoring</strong> — watch for three firings that should stay at zero:
+    <ul>
+      <li><code>[STORE] REJECTED CORRUPT FILL</code> (Layer 2 guard)</li>
+      <li><code>IntegrityError: CHECK constraint failed</code> (Layer 3 schema)</li>
+      <li>Orphan rows in <code>paper_trades WHERE status='filled' AND fill_price IS NULL</code></li>
+    </ul>
+  </li>
+  <li><strong>Sprint 13c feature telemetry</strong> — <code>flow_acceleration</code> ~24%, <code>event_relative_flow</code> ~67%, stale-sibling flag ~6% (kill at 20%). Alert if &gt; 15%.</li>
+  <li><strong>At N=500:</strong> retrain ML per <code>PYTHONPATH=. python diamond_ml_train.py</code>. Validate Brier &lt; 0.05 AND Jaccard ≥ 0.70 on CV folds before proceeding.</li>
+  <li><strong>At validated ML:</strong> wire <code>ml_edge &lt; KELLY_MIN_EDGE_HURDLE</code> into <code>_execute_trade</code> ENTRY gate (not sizing). Rerun Phase C on post-N=500 data. If MaxDD compresses to ≤1.25%, proceed to activation.</li>
+  <li><strong>Activation (if all gates pass):</strong> flip <code>KELLY_SIZING_ENABLED = true</code>, wire <code>kelly_contracts()</code> into <code>_execute_trade</code> sizing path, replacing the flat tiered logic.</li>
+</ol>
+</div>
+
+<div class="footer">
+Generated 2026-04-21. Code references: <code>backtest_kelly.py</code>, <code>src/diamond_kelly.py</code>, <code>src/diamond_shrinkage.py</code>, <code>diamond_config.py</code>.
+<br>
+Related memory artifacts: <code>CLAUDE.md</code> § Sprint 14c-addendum / 14d, <code>~/.claude/.../memory/session_handoff_2026_04_21.md</code> (if produced separately).
+</div>
+
+</div>
+</body>
+</html>

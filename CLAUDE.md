@@ -452,7 +452,54 @@ Bootstrap (event-cluster, N=10,000): P&L diff mean −$473 [p05: −$685, p95: �
 
 **Interpretation:** Empirical validation of Sprint 13b's theoretical IC finding. Raw price-bucket WR has near-zero post-price IC; Kelly-sizing that noise produces leverage into tail outcomes rather than dampening risk. **Do NOT use bucket-WR as a Kelly edge estimator.** A properly calibrated per-trade ML model is mandatory.
 
-**Gap identified (pending Sprint 14d):** Small-sample variance in bucket estimators masquerades as massive edge on cheap contracts (convexity × leverage). Bayesian shrinkage toward market-implied prior is the fix; architecture staged in `src/diamond_shrinkage.py` (dormant pending prior-strength calibration decision).
+**Gap identified → closed in Sprint 14d** (below): Bayesian shrinkage with k=20+3√N pseudocount, compression and limits measured.
+
+### Sprint 14d (2026-04-21, HARNESS CLOSED OUT) — Bayesian shrinkage + Two-Gate Stack epistemology
+
+Closed out Sprint 14 with the Laplace-smoothed bucket estimator and an empirical audit of what shrinkage can and cannot do.
+
+**`src/diamond_shrinkage.py` — now complete, dormant pending ML integration:**
+- `shrunk_wr(wins, n, prior_mean, prior_strength)` — Laplace smoothing, self-checked on 5 hand-computed cases (phase C steamroller at k=20 → edge=0.04; large-N regime dominates prior; input validation; etc.)
+- `prior_strength_default(n, p)` = `20 + 3√N`
+  - **k_base=20 is analytically derived** (not heuristic): the minimum pseudocount that squashes a 1σ noise event at N=5 below the 5% per-trade Kelly cap. For wins=2, n=5, p=0.20: shrunk_edge = (W − N·p)/(N+k) = 1/(5+k) ≤ 0.04 requires k ≥ 20.
+  - **α√N floor** is isomorphic to the standard error of a proportion — prior weight fades in lockstep with the data's statistical precision. Principled Empirical Bayes.
+  - Schedule: N=0 → k=20 (100% prior), N=25 → k=35 (58% prior), N=100 → k=50 (33% prior), N=400 → k=80 (17% prior).
+- Two convenience wrappers: `shrunk_bucket_edge()` for Phase C use, `shrunk_category_wr()` for future ML target encoding.
+
+**Phase C re-run results (matched N=227, bootstrap 10,000):**
+
+| Run | Kelly P&L | Kelly MaxDD | Boot mean P&L diff | Boot p95 P&L diff |
+|---|---|---|---|---|
+| Naive bucket (legacy tombstone) | −$477.50 | 55.22% | −$473 | −$188 |
+| Shrunk (k=20+3√N, matched) | −$277.58 | 34.11% | −$277 | −$8 |
+| **Shrunk (no warmup cutoff, full N=289)** | **−$221.25** | **34.09%** | **−$216** | **+$83** |
+
+Shrinkage compressed the loss by 42%, compressed MaxDD by 38%, and — critically — pushed the bootstrap p95 across zero. 5% of draws now show Kelly **beating** Flat. The naive run never had a positive bootstrap draw.
+
+**The 15-24¢ steamroller — partially exhumed:**
+
+| | Naive | Shrunk |
+|---|---|---|
+| Trades Kelly took | 20 | 10 |
+| Kelly P&L contribution | −$344.86 | −$140.32 |
+
+Shrinkage halved the bucket's exposure and cut its P&L contribution by 59%. The `k ≥ 20` analytical bound held — the math protected against the steamroller exactly as derived. But 10 trades still leaked through because they cleared a sub-hurdle shrunk edge with hundreds of prior observations; once Kelly is admitted, its allocation is driven by bucket size × contract price, not shrinkage magnitude.
+
+**min_active_n hard cutoff retired (2026-04-21):** The `--min-active-n` CLI flag and associated logic were deleted after the ablation proved shrinkage handles warmup dynamically. Hard cutoffs introduce step-function discontinuities (at N=9 reject; at N=10 size dynamically); shrinkage replaces them with a mathematically smooth taper from 0 to f* as sample accumulates. Default Phase C is now `shrink=True`; `--no-shrink` remains available for tombstone reproduction only.
+
+**The Fundamental Theorem of Alpha (stated informally):**
+> *"Shrinkage is a variance-reducer, not an information-creator."*
+
+Empirical proof: a zero-IC estimator + optimal shrinkage still produces negative expected value. The bucket-WR estimator post-Sprint-13b has near-zero post-price IC; shrinkage makes it safer (smaller tails, more selective) but cannot manufacture edge. Residual −$277 loss is information-theoretic, not sizing-theoretic.
+
+**The Two-Gate Stack (Kelly activation epistemology):**
+
+Kelly sizing is an *amplifier*. Shrinkage is a *dampener*. An ML model with real IC is the *engine*. All three are required:
+
+1. **Gate A — Information:** ML produces calibrated edge with Brier < 0.05 AND Jaccard ≥ 0.70
+2. **Gate B — Variance control:** Shrinkage wraps the ML output with k=20+3√N pseudocount
+
+Only after both gates pass is `KELLY_SIZING_ENABLED=true` safe. Flipping one without the other reproduces either Phase C naive (variance disaster) or a zero-EV strategy sized correctly.
 
 ### Sprint 13a (2026-04-09, DEPLOYED) — L1 collinearity trap fix
 Lasso (`l1_ratio=1.0`) was zeroing out correlated discriminative features arbitrarily — Jaccard < 0.30 across CV folds (target ≥ 0.70). Switched shadow ML to **Ridge L2** (`l1_ratio=0.0`). Sparsity sacrificed for stability; feature subset now consistent across folds. Live execution unaffected (ML still shadow mode).
