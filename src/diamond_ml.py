@@ -193,6 +193,14 @@ RAW_FEATURES = [
     # FeatureOrthogonalizer to remove price confounds.
     "flow_acceleration",       # 2nd derivative of trade velocity (transient shocks)
     "event_relative_flow",     # disproportionate share of event's sibling flow
+    # ── Order-book absorption variants (Sprint 14e, 2026-04-26) ────
+    # 4 candidate formulas measuring volume × book-depth interaction over
+    # a 60s window. ML-only — not in SCORER_WEIGHTS. Null-importance test
+    # at N=500 retrain decides which (if any) survive.
+    "book_absorption_static",     # A — gross flow / depth at t0
+    "book_absorption_depletion",  # B — net depth change rate (cents/sec)
+    "book_absorption_sided",      # C — side-weighted (yes_pressure − no_pressure)
+    "book_absorption_replenish",  # D — depth replenishment ratio (defended vs eaten)
 ]
 
 # ── Engineered feature names ─────────────────────────────────────────

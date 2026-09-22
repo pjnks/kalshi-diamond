@@ -787,8 +787,18 @@ class DiamondStore:
         wins = self._conn.execute(
             "SELECT COUNT(*) as n FROM paper_trades WHERE status = 'settled' AND pnl_cents > 0"
         ).fetchone()["n"]
+        # Sprint 14g (2026-05-01): TWO P&L queries — cumulative (for dashboard
+        # + cumulative kill switch) and daily-realized (for daily kill switch).
+        # Pre-fix: a single SUM with no date filter was assigned to the
+        # variable that the daily kill switch checks. The kill switch
+        # silently behaved as cumulative, latching permanently after
+        # cumulative crossed -$20. See CLAUDE.md § Sprint 14g.
         total_pnl = self._conn.execute(
             "SELECT COALESCE(SUM(pnl_cents), 0) as pnl FROM paper_trades WHERE status = 'settled'"
+        ).fetchone()["pnl"]
+        today_realized_pnl = self._conn.execute(
+            "SELECT COALESCE(SUM(pnl_cents), 0) as pnl FROM paper_trades "
+            "WHERE status = 'settled' AND settled_at >= strftime('%s', 'now', 'start of day')"
         ).fetchone()["pnl"]
         open_count = self._conn.execute(
             "SELECT COUNT(*) as n FROM paper_trades WHERE status IN ('pending', 'filled')"
@@ -822,8 +832,9 @@ class DiamondStore:
                     pnl_per_contract = (float(current_price) - float(entry_price))
                     unrealized_pnl += pnl_per_contract * fill_count
 
-        # Total daily P&L = realized + unrealized
-        total_daily_pnl = total_pnl + unrealized_pnl
+        # Sprint 14g fix: daily P&L = TODAY's realized + current unrealized.
+        # Was previously total_pnl (all-time) + unrealized — the bug.
+        total_daily_pnl = today_realized_pnl + unrealized_pnl
 
         return {
             "total": total,
@@ -831,9 +842,10 @@ class DiamondStore:
             "settled": settled,
             "wins": wins,
             "win_rate": wins / settled if settled > 0 else 0.0,
-            "total_pnl_cents": total_pnl,
+            "total_pnl_cents": total_pnl,                       # CUMULATIVE — for dashboard + cumulative kill switch
+            "today_realized_pnl_cents": int(today_realized_pnl),  # daily realized only (Sprint 14g)
             "unrealized_pnl_cents": int(unrealized_pnl),
-            "total_daily_pnl_cents": int(total_daily_pnl),
+            "total_daily_pnl_cents": int(total_daily_pnl),      # daily realized + unrealized (for daily kill switch)
             "open_positions": open_count,
             "daily_spend_cents": self.get_daily_spend_cents(),
         }

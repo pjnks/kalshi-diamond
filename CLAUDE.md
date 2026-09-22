@@ -1,5 +1,24 @@
 # DIAMOND — Kalshi Unusual Volume Tracker
 
+## 🔴 RETIRED (2026-05-13)
+
+**Strategy autopsy: [reports/2026_05_13_diamond_strategy_autopsy.html](reports/2026_05_13_diamond_strategy_autopsy.html)**
+
+DIAMOND has been **shut down and archived** after the post-Sprint-14h clean cohort produced a five-way diagnostic agreement that the underlying hypothesis (Kalshi orderbook microstructure contains tradeable alpha at retail scale) is falsified.
+
+**Final state:**
+- Tier-1 cumulative kill switch latched at −$51.52 on 2026-05-08 (1,575 settled, 53.78% WR all-time)
+- N=305 post-14h clean cohort: Brier=0.2000, AUC=0.750 (degrading), 3/9 features survived null-permutation test
+- `diamond-monitor` + `diamond-dashboard` services stopped + disabled on OCI
+- DB archived to `diamond_trades.db.shutdown-2026-05-13` (VM) and `~/Documents/quant/diamond/archive/diamond_trades.db.shutdown-2026-05-13.gz` (Mac)
+- 3 positions remain open (no manual exit per training-distribution rule); will not be polled for settlement
+
+The infrastructure built for DIAMOND (PiT-purged CV, three-layer data integrity, two-tier kill switch, task-death watchdog, cohort-burn discipline) transfers to BERYL/CITRINE. See § "Institutional Assets" at end of file.
+
+The documentation below is preserved for historical/forensic reference. Active operational guidance (deploy.sh, --restart commands, monitoring) is no longer current.
+
+---
+
 ## Project Purpose
 Real-time anomaly detection on Kalshi prediction markets with **two-stage detection engine** (2 triggers + 8 scorers), event-aware conviction tracking, portfolio intelligence, and automated live trading. Places real orders on Kalshi when anomalies are detected with order-book-aware pricing.
 
@@ -224,33 +243,79 @@ PYTHONPATH=. python diamond_backtest.py evaluate            # Precision evaluati
 - Notification pattern reused from HMM-Trader's `src/notifier.py`
 - Gemstone naming: prefix files with `diamond_` for project-specific modules
 
-## Current Status (April 20, 2026)
-**Live trading active on OCI — 729 settled trades, 50.9% win rate, -$10.87 cumulative P&L. Sprint 14 (data integrity) + Sprint 14b (Layer 3 schema constraint) DEPLOYED. Sprint 14c (Kelly + backtest) staged dormant. System in patience window awaiting N=500 post-Sprint-11 retrain gate (~mid-July at current tempo).**
+## Current Status (May 13, 2026) — 🔴 STRATEGY RETIRED
 
-**Today (Apr 20 UTC)**: 5 settled, 2W/3L (40% WR, **+$0.59** — inverse of Apr 19 pattern: losing WR, winning P&L). 8 opened. 4 currently open:
-- `KXPERUPRES-26-KFUJ` no @ 67¢ (Apr 13 — long-dated event)
-- `KXNBAROY-26-CFLA` no @ 43¢ (Apr 13 — long-dated event)
-- `KXTRUMPOUT27-27-26AUG01` no @ 95¢ (Apr 20 — long-dated political, in the −3.6pp edge 75+¢ bucket; mathematically near-impossible to clear execution friction at this price, DELIBERATELY NOT INTERVENED to preserve training-distribution right tail for ML retrain)
-- `KXMLBGAME-26APR201845ATLWSH-ATL` yes @ 62¢ (Apr 20 — intraday sports)
+**DIAMOND has been shut down following five-way diagnostic agreement that the underlying hypothesis is falsified.** See `reports/2026_05_13_diamond_strategy_autopsy.html` for the full autopsy.
 
-**Post-Sprint-11 progress**: 287/500 settled trades toward ML retrain gate. Trade tempo ~2.5/day → gate unlocks **~mid-July 2026** (not May as earlier estimated; recalibrated based on actual tempo).
+### Final tally
 
-**All three data-integrity layers LIVE (as of 2026-04-20 04:42 UTC):**
+| Metric | Value |
+|---|---|
+| **Status** | 🔴 RETIRED |
+| Services on OCI | `diamond-monitor`: stopped + disabled. `diamond-dashboard`: stopped + disabled. |
+| Total settled (all-time) | 1,575 |
+| All-time WR | 53.78% |
+| **Cumulative P&L** | **−$51.52** (Tier-1 kill switch latched 2026-05-08) |
+| Post-14h clean cohort | 305 settled, 60.33% WR, −$19.65 P&L |
+| Final Brier (N=300, PiT-purged) | 0.2000 ± 0.0295 |
+| Final AUC (N=300) | 0.750 (degrading from 0.787 at N=200) |
+| Features surviving null-permutation | 3 of 9 |
+| Pre-registered N=300 verdict | **0.20-0.22 = Inconclusive** — landed on dividing line between salvageable signal and dead hypothesis |
+| Open positions at shutdown | 3 (KXALIENS-27 no@78c, KXITFMATCH-…GUO no@49c, KXTRUMPOUT27 yes@8c — Trump Aug 2027 tail) |
 
-| Layer | Mechanism | Status |
+### The five-way diagnostic agreement
+
+1. **Brier plateau** at 0.20 across N=150 → 300 (no descending slope — model has stopped learning)
+2. **AUC degrading** with N (0.787 → 0.750) — signature of small-sample overfit melting away
+3. **Feature count collapse** at N=300 (5 → 3, null-permutation test rejected Sprint 14e absorption variants)
+4. **Persistent U-shape monotonicity inversion** (intrinsically orthogonal features did not break base-rate conflation)
+5. **OOS WR CI [18.6%, 49.9%]** includes 50% — cannot reject null hypothesis of no edge
+
+### Dual verdict (execution + evaluation)
+
+| Layer | Result |
+|---|---|
+| Execution | −$51.52 cumulative, Tier-1 kill switch caught the bleed at the structural risk tolerance |
+| Evaluation | Brier 0.20 plateau + AUC degrading + 3/9 features survive null test = no scalable IC |
+
+Both layers independently arrived at the same conclusion. The hypothesis — "Kalshi orderbook microstructure contains tradeable alpha at retail scale via flat-sized longshot-biased anomaly detection" — is empirically falsified.
+
+### DB archive
+
+- **VM**: `/home/ubuntu/kalshi-diamond/diamond_trades.db.shutdown-2026-05-13` (398MB plain, 107MB gzipped)
+- **Mac**: `~/Documents/quant/diamond/archive/diamond_trades.db.shutdown-2026-05-13.gz` (107MB)
+- 1,787 paper_trades, 89,376 anomalies, 1,275,176 trades, 126,265 book_snapshots, 9,383 skipped_trades, 20,980 market_profiles
+- SQLite `integrity_check`: ok
+
+---
+
+## Historical sprint state (preserved for forensic reference)
+
+The sections below document the full Sprint 14 series that led to the autopsy. Operationally these are no longer relevant (daemon is stopped), but they capture the institutional knowledge that transfers to BERYL/CITRINE.
+
+### Pre-shutdown state (May 6, 2026 — 13:25 UTC, 11h post-Sprint-14h)
+**Was live trading active on OCI — Sprints 14/14b/14c/14d/14e/14f/14g/14h all DEPLOYED + VERIFIED. State at that snapshot: 1,364 settled, 53.15% WR, −$34.99 cumulative P&L. Today (May 6 UTC, partial): 101 settled, 67 wins (66.3% WR), −$3.92. Sprint 14h (2026-05-06 02:12:12 UTC, epoch `1778033532`) fixed silent task death from `asyncio.CancelledError`. Three patches: (1) explicit CancelledError handling in `orderbook_poll_loop` + `metadata_refresh_loop` with heartbeat logging, (2) top-level task death watchdog that fires Pushover CRITICAL on unexpected task death, (3) N=500 cohort reset (393 contaminated trades purged). Verified healthy: 651 heartbeats logged, 0 errors, 0 task deaths, absorption pipeline back to 0.00% stale + 99.98% nonzero across 16,921 anomalies in last 6h. Post-14h cohort velocity: 94 settled in first 11h = ~205/day initially, sustained at ~145/day over 24h. Cohort completed at N=305 when Tier-1 cumulative kill switch latched on May 8.**
+
+**Sprint 14h forensic timeline:**
+- May 1 03:09 UTC: Sprint 14g restart. orderbook_poll_loop starts.
+- May 1 18:14 UTC: aiohttp session recycle → CancelledError → task dies silently.
+- May 1 18:17 UTC: last book_snapshot row written.
+- May 3 18:27 UTC: 2-day pruning empties book_snapshots table.
+- May 4-5: `_book_absorption_stale = 1.0` on 100% of anomalies (Sprint 14e canary firing correctly, but no human attention on it).
+- May 5 02:00 UTC: user requests daily status report → audit catches the regression.
+- May 6 02:12:12 UTC: Sprint 14h deployed.
+
+**Pre-14h cohort (purged):** 393 settled trades opened Apr 29 03:04 → May 6 02:12. ~83% have zeroed absorption features.
+
+**Total cohort cost across Sprints 14e/14f/14h:** 290 + 50 + 393 = **733 trades** purged. Each reset preserved stationarity rather than moving goalposts.
+
+**All three data-integrity layers LIVE (continuous since Apr 16):**
+
+| Layer | Mechanism | Firings since deploy |
 |---|---|---|
-| 1 — Code | `_cancel_after()` derives fill_price from Kalshi API cost fields | ✓ LIVE (Apr 16) |
-| 2 — Application | `update_paper_fill` guard rejects corrupt writes, downgrades to `unfilled` | ✓ LIVE (Apr 16) |
-| 3 — Schema | `check_valid_fill` CHECK constraint rebuilt `paper_trades` with NOT NULL invariant | ✓ LIVE (Apr 20) |
-
-**Guard telemetry (16h post-Layer-3 deploy):**
-- Layer 2 `[STORE] REJECTED CORRUPT FILL` firings: **0** (Layer 1 covering)
-- Layer 3 `IntegrityError: CHECK constraint failed` firings: **0** (Layer 1+2 covering)
-- Orphans (`status='filled' AND fill_price IS NULL`): **0**
-- `sqlite3 integrity_check`: **ok**
-- Monitor uptime: 16h stable, RSS **242 MB / 600 MB** (plateau'd from startup 389 MB as SQLite mmap warmed; 10 MB Python heap confirms no code-level leak — via `/proc/smaps` analysis)
-
-**Sprint 13c shadow telemetry** (stable): `flow_acceleration` activates 24.4%, `event_relative_flow` activates 66.9%, stale-sibling flag fires on 6.0% (under 20% kill threshold).
+| 1 — Code | `_cancel_after()` derives fill_price from Kalshi API cost fields | 0 corrupt fills |
+| 2 — Application | `update_paper_fill` guard rejects corrupt writes, downgrades to `unfilled` | 0 firings |
+| 3 — Schema | `check_valid_fill` CHECK constraint rebuilt `paper_trades` with NOT NULL invariant | 0 violations |
 
 ### Sprint 14 (2026-04-16/18, DEPLOYED) — Data integrity + execution layer hardening
 
@@ -403,12 +468,12 @@ Defense-in-depth now complete: three layers (code / application / schema) with n
 
 **NOT shipped (deliberately):** Kelly is not wired into `diamond_paper.py`. Live execution still uses flat tiered sizing. No code path currently imports `diamond_kelly.py` from production. Activation requires explicit config flip + ML integration work (see below).
 
-**Activation path (4 sequential gates — tightened 2026-04-21):**
-1. N ≥ 500 post-Sprint-11 settled trades (tempo projects ~mid-July)
+**Activation path (4 sequential gates — tightened 2026-04-21, regime cutoff updated 2026-04-29):**
+1. **N ≥ 500 post-Sprint-14f settled trades** (Unix epoch ≥ `1777431874` = 2026-04-29 03:04:34 UTC; measured tempo ~70/day → **ETA ~May 6**). The Sprint 14e cutoff (`1777346853`) was obsoleted by the Sprint 14f orderbook-poll fix; trades collected between the two have broken absorption features. See Sprint 14f regime-cutoff rationale.
 2. ML retrain produces validated model: **Brier < 0.05 AND Jaccard ≥ 0.70** across CV folds
    (tightened from Brier < 0.25 after Phase B; see Sprint 14c-addendum below)
 3. **Wire ML edge into entry gate** (not just sizing) — add `ml_edge < MIN_EDGE_HURDLE` pre-entry rejection to `_execute_trade()`. Sprint 13b proved composite score has near-zero IC; Phase C empirically confirmed at −$477/55% DD what happens when Kelly sizes composite-admitted noise.
-4. Backtest validates: run `backtest_kelly.py` on post-N=500 data. Confirm Phase C max-drawdown shrinks vs flat with the new ML-backed edge estimator. Then flip `KELLY_SIZING_ENABLED=true`.
+4. Backtest validates: run `backtest_kelly.py` on post-N=500 (post-14e) data. Confirm Phase C max-drawdown shrinks vs flat with the new ML-backed edge estimator. Then flip `KELLY_SIZING_ENABLED=true`.
 
 ### Sprint 14c-addendum (2026-04-21, HARNESS EXECUTED) — Phase ABC findings
 
@@ -522,8 +587,186 @@ Two new shadow ML features designed to be price-independent by construction:
 
 6. **`evaluate_model.py` extension** — Added `Sparse Orthogonal Feature Evaluation` block. Reports activation rate, price correlation (kill at >0.30), conditional IC, residual IC, top quintile edge. Kill conditions: `abs(price_corr) > 0.30` OR `abs(cond_ic) < 0.05` at N≥50.
 
-### Patience Discipline (CRITICAL)
-**Hold ML retrain until N=500 post-Sprint-11 settled trades accumulate** (~April 17-20 ETA). Sprint 11 (Apr 2) and Sprint 13a (Apr 9) both changed the data-generating distribution; retraining on N<500 would overfit to a regime that mixes pre/post Sprint 11/13a behavior. The shadow telemetry will accumulate during this window — do NOT rush the retrain.
+### Sprint 14e (2026-04-26 → 2026-04-28, DEPLOYED) — WebSocket subscription fix + book absorption metrics + REGIME CUTOFF
+
+**The most expensive 30-line bug in DIAMOND's history.** Three compounding flaws in the WebSocket subscription path were silently dropping ~60-90% of the eligible market universe since startup. Discovered by a "why is Kalshi so quiet?" diagnostic on 2026-04-26.
+
+**Phase 1 — Subscription pipeline fix (deployed 2026-04-26 22:13 UTC):**
+- `diamond_monitor.py:602`: `BATCH_SIZE = 100` capped startup subscriptions; `remaining = tickers[BATCH_SIZE:]` was captured but never used.
+- `KalshiWSClient.connect()`: only subscribed to the initial tickers; reconnect re-used the same set, ignoring any updates.
+- `metadata_refresh_loop()`: updated `market_cache` for the dashboard but never told the WebSocket about new tickers.
+- **Fix**: added `_desired_tickers: set[str]` instance state to `KalshiWSClient`, restored on reconnect; new `sync_subscriptions()` method computes add/remove deltas; new `resubscribe_loop()` task in monitor diffs `market_cache.keys()` against subscribed set every `METADATA_REFRESH_SEC=300`.
+- **Verified live**: subscription went from 67 → 128 → 257 tickers post-fix. Trade-stream throughput recovered from ~0-1/min to 500-1300/min (the system's design baseline).
+
+**Phase 3 — Order-book absorption metrics (deployed 2026-04-28 03:27:33 UTC):**
+- New `book_absorption_metrics()` in `src/diamond_features.py` (~140 lines). Single shared data extraction (book_now + book_prev + trades_in_60s_window) feeds 4 candidate variants:
+  - `book_absorption_static` — gross flow / depth at t₀
+  - `book_absorption_depletion` — net depth change rate (cents/sec)
+  - `book_absorption_sided` — side-weighted (yes_pressure − no_pressure)
+  - `book_absorption_replenish` — defended vs eaten ratio (Variant D, most information-rich)
+- Variant D edge case: if total_volume ≥ depth_at_t₀, force `-1.0` ("book swept / toxic flow" sentinel).
+- Window: 60s (matches anomaly cadence; ruled by collaborator 2026-04-26).
+- `_book_absorption_stale` telemetry flag fires when prior-snapshot is missing. Kill-switch: alert if firing rate > 20% of activations long-term.
+- **Shadow mode discipline**: 4 variants added to `RAW_FEATURES` in `diamond_ml.py`. NOT in `SCORER_WEIGHTS`. Composite score and live execution untouched.
+
+**REGIME CUTOFF — N=500 GATE RESET TO 2026-04-28 03:27:33 UTC (Sprint 14e Deployment):**
+- The Phase 1 fix changed the data-generating distribution by expanding the observed universe from 67 to 257+ tickers. The new universe includes intraday sports, crypto, and rapid-resolution binary contracts with entirely different volatility profiles than the constrained pre-fix universe.
+- The 290 trades opened pre-2026-04-28 03:27:33 UTC are the **Pre-14e Cohort** — purged from the final ML training dataset. Retained for historical analysis only.
+- The N=500 ML retrain gate is **reset to count only trades opened on or after 2026-04-28 03:27:33 UTC** (Unix epoch `1777346853`).
+- Phase 3 absorption metrics are zero for the entire Pre-14e cohort (the feature didn't exist yet) — another reason to purge them. Mixing cohorts would cause Ridge regression to learn that absorption is meaningless (because it's structurally zero in 290 of 500 rows).
+- ETA at sustained ~50/day tempo: **~10 days** (early-to-mid May 2026).
+
+**Empirical evidence forcing the cutoff** (learning curve sweep, 2026-04-27):
+| N (post-Sprint-11) | Brier | AUC | Δ vs naive |
+|---|---|---|---|
+| 250 | 0.1923 | 0.761 | −0.058 |
+| 290 | 0.2087 | 0.744 | −0.041 |
+| 340 | 0.2291 | 0.714 | −0.020 |
+
+Brier is monotonically rising; AUC is monotonically falling; gap to naive collapsing. Diagnosed as regime-mixing contamination, not feature-IC failure. Sprint 14e cohort isolation is the corrective action.
+
+**Monitoring protocol (during the new patience window):**
+1. **48h check** (~2026-04-30): ✅ PASSED — `_book_absorption_stale` rate dropped to **0.0%** (9/47,101) at +24h post-Sprint-14f. Nonzero absorption values at 98.8%. See Sprint 14f verification results in Current Status.
+2. **N=100 check** (~2026-05-01 at revised 70/day tempo): **PENDING** — post-14f cohort was at 67/500 as of Apr 30. Run `PYTHONPATH=. python learning_curve.py --grid 50,100` when cohort crosses 100. Pre-registered thresholds: Brier < 0.18 = absorption working; 0.20-0.22 = needs more N; > 0.23 = concern. Note: `--min-opened-at` default in `learning_curve.py` already set to Sprint 14f cutoff (`1777431874`).
+3. **Do NOT touch execution thresholds.** Composite score firing rate, ALERT/CRITICAL thresholds, tiered sizing all unchanged.
+4. **Do NOT lower the Brier < 0.05 ML promotion gate.** Two-Gate Stack policy stands.
+
+### Sprint 14f (2026-04-29 03:04:34 UTC, DEPLOYED) — Orderbook poll universe expansion + N=500 reset
+
+**Bug:** `orderbook_poll_loop` had a hardcoded `tickers_to_poll = active_tickers[:30]` cap from the early sandbox era when the universe was ~30 tickers. Combined with `get_all_active_tickers()` returning historical (alphabetically-ordered) tickers, the poll was capturing book snapshots ONLY for ~30 long-dated political/entertainment markets (KXAMERICANIDOL, KXARREST, KXARTISTSTREAMS) that almost never fire anomalies. The high-velocity sports markets that actually fired anomalies (MLB, NBA, NHL, soccer, tennis) had **zero book snapshots ever recorded**.
+
+**Symptom (caught by Phase 3 telemetry within 23 hours of Sprint 14e deploy):** `_book_absorption_stale` flag firing on **100% of 34,960 anomalies**. The `_book_absorption_stale` canary worked as designed — surfaced what would otherwise have been a 9-day silent failure ending in a mysterious null-importance result on the absorption variants.
+
+**Fix:**
+- `orderbook_poll_loop`: switched poll target from `store.get_all_active_tickers()[:30]` to `list(market_cache.keys())` (the actual current active universe per the metadata refresh loop).
+- Per-request sleep tightened from `0.5s` → `0.1s` (10 req/sec, 50% safety buffer under Kalshi's 20 req/sec limit).
+- Math: ~250 tickers × 0.1s = 25s per full sweep. With `REST_POLL_INTERVAL_SEC` between sweeps, every ticker gets polled ~every 30-60s — comfortably inside the 60s absorption window lookback.
+
+**REGIME CUTOFF — N=500 GATE RESET TO 2026-04-29 03:04:34 UTC (Sprint 14f Deployment):**
+- The 50 trades opened in the post-14e / pre-14f window (2026-04-28 03:27:33 to 2026-04-29 03:04:34) all have all-zero absorption features (the data conduit was broken). Including them would cause Ridge regression to learn that absorption variants don't predict outcomes — false null-importance, false negative on potentially valuable features.
+- The N=500 ML retrain gate is **reset to count only trades opened on or after 2026-04-29 03:04:34 UTC** (Unix epoch `1777431874`).
+- Pre-14f Cohort (50 trades, broken absorption) joins the Pre-14e Cohort (290 trades, no absorption code) in the "purged from training set" pile.
+- ETA at sustained ~70/day (revised up from 50/day after Sprint 14e universe expansion): **~May 6** (67/500 as of Apr 30).
+
+**Cost of the regime reset:** 50 trades + ~22 hours of patience window. **Cost of NOT resetting:** false-negative null importance on the absorption features → 9-day patience window wasted → another retrain cycle needed → 3-4 more weeks of total delay. The reset is the cheap option.
+
+**Verification protocol (post-deploy) — ALL PASSED:**
+1. +10 min: snapshot history populated for 99 distinct tickers (was 33 pre-fix). ✅
+2. +10 min: stale rate on post-14f anomalies = 11.5% (warmup, brand-new tickers without 60s-prior history). ✅ Expected.
+3. +24h (Apr 30): stale rate = **0.0%** (9/47,101). Nonzero absorption values = **98.8%** (46,548/47,101). Snapshot breadth = 125 tickers. ✅ Absorption pipeline fully operational.
+4. Weekly: re-check stale rate. Alert if it climbs above 5% sustained (would indicate Kalshi rate limiting or poll-loop degradation).
+
+### Sprint 14g (2026-05-01 03:09:02 UTC, DEPLOYED) — Kill switch SQL aggregation bug + two-tier cap
+
+**The third sandbox-era artifact found in 5 days.** After Sprint 14e (subscription truncation `[:100]`) and Sprint 14f (orderbook poll cap `[:30]`), Sprint 14g surfaces another archetype: an **unbounded SQL aggregation**.
+
+**Bug:** `src/diamond_store.py:get_paper_stats()` had:
+```sql
+SELECT COALESCE(SUM(pnl_cents), 0) FROM paper_trades WHERE status = 'settled'
+```
+…with no date filter. The result was assigned to a variable named `total_pnl` and used as `total_daily_pnl_cents` downstream. The daily kill switch in `diamond_paper.py:_execute_trade` checked that "daily" value, which was actually all-time cumulative. The discrepancy was invisible until cumulative P&L crossed −$20 on 2026-04-29; from that moment, every entry attempt was rejected with `kill_switch: P&L -2195¢ < -$20`.
+
+**Symptom (caught 2026-05-01 by Sprint 14e telemetry methodology):** 0 entries opened in the entire UTC day Apr 30 despite 2,841 ALERT-level anomalies firing. Skip-reasons query showed **1,765 `kill_switch` rejections in 24h** while today's actual realized P&L was +$0.00.
+
+**Fix (two-tier kill switch):**
+- `src/diamond_store.py`: added separate `today_realized_pnl` query with `settled_at >= strftime('%s', 'now', 'start of day')` filter. Returns both `total_pnl_cents` (cumulative) and `today_realized_pnl_cents` (daily) so callers don't have to guess.
+- `diamond_paper.py:_execute_trade`: split into two checks, evaluated in order:
+  - **Tier 1 (cumulative hard halt):** `cumulative_pnl < -PAPER_MAX_CUMULATIVE_CENTS` ($50). NEVER auto-resets. Hitting this means strategy must be re-validated before trading. Skip reason: `kill_switch_cumulative`.
+  - **Tier 2 (daily soft halt):** `today_realized + unrealized + estimated_cost < -PAPER_MAX_UNREALIZED_CENTS` ($20). Resets at UTC midnight. Skip reason: `kill_switch_daily`.
+- `diamond_config.py`: `PAPER_MAX_CUMULATIVE_CENTS = 5000` (env-overridable).
+
+**Recovery:** With cumulative at -$20.96 (well above the new -$50 cap) and today's daily P&L at +$0.00, the cumulative check passes. The daily check now correctly evaluates today_realized + unrealized = $0.00, well above -$20 — entries should resume immediately on first post-deploy ALERT.
+
+**Sandbox artifact pattern (now 3 confirmed):**
+| Sprint | Artifact | Failure mode |
+|---|---|---|
+| 14e | `BATCH_SIZE = 100; first_batch = tickers[:BATCH_SIZE]` | Subscription truncated; 60% of universe deaf |
+| 14f | `tickers_to_poll = active_tickers[:30]` | Orderbook polled only 30 historical tickers; sports markets had 0 snapshots |
+| 14g | `SUM(pnl_cents) WHERE status='settled'` (no date filter) | Daily kill switch silently checked cumulative |
+| 14h | `except Exception` in `orderbook_poll_loop` (CancelledError = BaseException, not Exception) | aiohttp session recycle raised CancelledError mid-request; bypassed handler; task died silently |
+
+**Common archetype:** code that was correct at small N, never revisited as the system grew, silently failing in production under conditions the original author didn't anticipate.
+
+**Backlog item (formal Sandbox Artifact Audit):** systematic grep of the codebase for unbounded `SELECT SUM/COUNT` queries, hardcoded `[:N]` slices, `except Exception` around await calls (CancelledError can escape), and similar small-N assumptions.
+
+### Sprint 14h (2026-05-06 02:12:12 UTC, DEPLOYED) — CancelledError catch + task death watchdog + N=500 reset
+
+**The fourth sandbox-era artifact found in 9 days.** Pattern continues: code correct at small N, broken at production scale, fails silently.
+
+**Bug:** `orderbook_poll_loop` (and `metadata_refresh_loop`) used `except Exception:` around `await rest.get_orderbook()` calls. Every 30 minutes (`SESSION_RECYCLE_SEC = 1800`) the aiohttp session is recycled — `_ensure_session()` calls `await self._session.close()` which cancels in-flight requests, raising `asyncio.CancelledError` inside the awaited HTTP request. **`CancelledError` is a `BaseException` subclass, NOT `Exception`** (this is intentional in Python 3.8+, so cancellation can't be swallowed by generic handlers). It bypassed both inner and outer `except Exception:` blocks and killed the task. `asyncio.gather(return_exceptions=True)` in `monitor()` then suppressed the death notification.
+
+**Symptom (caught 2026-05-05 by audit triggered by user inquiry):** `book_snapshots` table empty for 4+ days, despite the daemon being up and trading actively. `_book_absorption_stale` rate at 100% on 9,151 anomalies in last 6h. Strace of running process showed **zero outbound HTTP syscalls** across all 5 threads. py-spy dump showed only the WebSocket thread active.
+
+**Forensic timeline:**
+1. **2026-05-01 03:09:02 UTC:** Sprint 14g restart. `orderbook_poll_loop` task starts. Continuous polling: 250 tickers × 0.1s sleep ≈ in-flight every iteration.
+2. **2026-05-01 18:14:00 UTC:** `[ERROR] asyncio: Unclosed client session` + `Unclosed connector` in log — session was force-recycled while orderbook_poll_loop was mid-request. CancelledError raised, bypassed `except Exception`, task died silently.
+3. **2026-05-01 18:17 UTC onward:** No `book_snapshots` rows written. Other loops (metadata_refresh, status_report, paper.poll, resubscribe) survived because none had in-flight requests at the cancellation moment.
+4. **2026-05-03 18:17:08 UTC:** Last NONZERO prune (466 rows). The 2-day pruning window caught up to the May 1 18:17 "wall."
+5. **2026-05-03 18:27:21 UTC:** First ZERO prune. Table now empty.
+6. **2026-05-04 onward:** `_book_absorption_stale = 1.0` on 100% of anomalies. The Sprint 14e canary fired correctly — but no one was watching the stale-rate alarm until the user asked for a daily status report.
+
+**Cohort impact (purged):** Of 393 settled trades in the post-14f cohort:
+- ~68 (Apr 29) had clean absorption telemetry
+- ~325 (May 1+) have all-zero contaminated absorption features
+- **~83% contamination** — feeding this to Ridge regression would mathematically anchor the absorption feature weights to zero, immunizing the model against learning anything about order book dynamics. The 393 trades join the 290+50 pre-14e/pre-14f purged cohorts.
+
+**Three-patch fix (deployed simultaneously to avoid mid-deploy regime mixing):**
+
+1. **Patch 1 — `orderbook_poll_loop` CancelledError handling + heartbeat** (`diamond_monitor.py:399`):
+   - Inner `try/except` now catches `asyncio.CancelledError` separately, logs warning, continues
+   - Outer `try/except` distinguishes "real shutdown cancellation" (running=False, propagate) from "stray cancel while running" (log, continue)
+   - Final `except BaseException` catches *anything* else (KeyboardInterrupt, SystemExit) to prevent silent death
+   - Startup banner: `[ORDERBOOK_POLL] Loop started`
+   - Heartbeat every 10 iterations (~5 min): `[ORDERBOOK_POLL] iter=N written=W errors=E cancels=C tickers=T`
+   - Absence of heartbeat is now an observable failure signal
+
+2. **Patch 2 — Top-level task death watchdog** (`diamond_monitor.py:642`):
+   - `_task_death_logger(name)` returns a `done_callback` that fires CRITICAL Pushover alert if a task dies with an exception
+   - Distinguishes clean cancel (info log), unexpected death (critical log + Pushover priority=1), and unexpected clean exit (error log)
+   - `_spawn(coro, name)` helper wraps `asyncio.create_task()` and attaches the callback in one step
+   - All 6 tasks (`metadata_refresh_loop`, `orderbook_poll_loop`, `status_report_loop`, `paper_poll_loop`, `ml_retrain_loop`, `ws_with_subscribe`, `resubscribe_loop`) now use `_spawn`
+   - Structurally guarantees: silent task death is impossible; future bugs of this class are detected within seconds
+
+3. **Patch 3 — `metadata_refresh_loop` CancelledError handling** (`diamond_monitor.py:370`):
+   - Same vulnerability (HTTP calls via `refresh_markets` → `rest._request`), same fix pattern
+   - Startup banner + same three-tier exception handling as Patch 1
+
+**Verification (post-deploy):**
+1. Wait for `[ORDERBOOK_POLL] Loop started` log line (~30s post-restart)
+2. Wait for first heartbeat `[ORDERBOOK_POLL] iter=1 written=N` (~60-90s post-restart)
+3. Confirm `book_snapshots` rows accumulating: `SELECT COUNT(*) FROM book_snapshots WHERE ts >= strftime('%s','now','-5 minutes')` should be > 100 within ~5 min
+4. After 30 min, look for `[ORDERBOOK_POLL] Request cancelled for X (likely aiohttp session recycle); continuing` — first session recycle should now be survived gracefully
+
+**REGIME CUTOFF — N=500 GATE RESET TO 2026-05-06 02:12:12 UTC (Sprint 14h Deployment):**
+- The 393 settled trades opened between Apr 29 03:04 UTC and May 6 02:12 UTC are the **Pre-14h Cohort**. Most have all-zero absorption features (the data conduit was broken May 1 18:14 onward). Purged from final training set; retained for historical analysis.
+- The N=500 ML retrain gate is **reset to count only trades opened on or after 2026-05-06 02:12:12 UTC** (Unix epoch `1778033532`).
+- Gate cohort epoch in `learning_curve.py` updated: default `--min-opened-at = 1778033532.0`.
+- Cost: 7 days lost (Apr 29 → May 6). Benefit: clean training data + immortal task watchdog that prevents this exact failure class permanently.
+
+**Activation timeline reset:**
+- N=500 ETA at *measured* 145/day tempo (148 settled in first 24h post-deploy; 11h burst rate of 205/day did not sustain): **~3 days from May 6** → **~May 9, 2026**.
+- Full Kelly activation timeline shifts BACK to roughly the original window: late May / early June for Two-Gate Stack validation + entry-gate wiring + flip.
+- Two-Gate Stack policy unchanged: Brier < 0.05 AND Jaccard ≥ 0.70 required to flip `KELLY_SIZING_ENABLED=true`.
+
+**N=100 checkpoint lesson (2026-05-07, retired):** The pre-registered N=100 Brier checkpoint was overoptimistic — it assumed CV would produce a valid fold at N=100, but the empirical PiT-purger threshold is `pit_mask.sum() >= 50` per fold (`src/diamond_ml.py:488`). With 5-fold CV at N=148, fold sizes are ~30 each; the first fold has fewer than 50 prior-settled trades, so all folds skip with "0 valid out of 0 attempted." The PiT purger is doing exactly what it was engineered to do in Sprint 13 — actively protecting against lookahead bias on samples too small to evaluate. **The first valid fold materializes at N≈250-300, not N=100.** Pre-registered thresholds rolled forward to N=300.
+
+**Revised N=300 Brier matrix:**
+- Brier < 0.18 → Signal (absorption variants adding IC)
+- Brier 0.20-0.22 → Inconclusive (need more N)
+- Brier > 0.23 → Systemic contamination (regime-mixing concern, investigate before N=500)
+
+**Revised checkpoint plan:**
+- **N=300** (~May 8 evening at 145/day): first valid PiT-purged fold expected → first real Brier signal. If signal/contamination, act before N=500. If inconclusive, hold to N=500.
+- **N=500** (~May 9): ML retrain trigger per existing roadmap.
+
+### Patience Discipline (CRITICAL — UPDATED 2026-05-06)
+**Hold ML retrain until N=500 post-Sprint-14h settled trades accumulate** (Unix epoch ≥ `1778033532`, ETA **~May 8-9** at measured 205/day tempo). The Sprint 14f cutoff (`1777431874`) is OBSOLETE — Sprint 14h's orderbook_poll_loop revival represents the third regime change in 9 days. Pre-14h cohorts (290 pre-14e + 50 post-14e/pre-14f + 393 post-14f/pre-14h) all retained for historical analysis but excluded from the final training set.
+
+**Total cohort cost summary (transparency for the audit log):** 290 + 50 + 393 = **733 trades** purged from the training set across Sprints 14e/14f/14h. Each cohort reset preserved dataset stationarity rather than moving goalposts. The alternative — feeding mixed-regime data to Ridge regression — would have produced a permanently broken model and required even longer recovery.
+
+This is now the THIRD cohort reset in 9 days. The pattern of repeated sandbox-artifact discoveries justifies the formal Sandbox Artifact Audit (now scheduled post-Sprint-14h stabilization).
+
+The shadow telemetry (`flow_acceleration`, `event_relative_flow`, `book_absorption_*`) will accumulate cleanly during this window — do NOT rush the retrain.
 
 ---
 **Historical sprints (pre-Sprint 13):**
@@ -765,50 +1008,55 @@ On Linux with systemd cgroups, `PRAGMA mmap_size=N` causes file-backed mmap page
 - `PRAGMA journal_mode=WAL` — concurrent read/write
 - MemoryMax raised to 600MB to accommodate mmap overhead
 
-## Performance Summary (as of April 20, 2026)
-- **Settled trades:** 729 (+9 since Apr 18)
-- **Win rate:** 50.9% (371W / 358L)
-- **Cumulative P&L:** -$10.87 (+$0.11 since Apr 18 — bleed rate decelerating: Apr 4→14 was −20¢/day, Apr 14→20 is −5¢/day)
-- **Today (Apr 20 UTC):** 5 settled, 2W/3L (40% WR, **+$0.59** — inverse pattern: losing WR, winning P&L)
-- **Post-Sprint-11 (opened ≥ Apr 2):** 287 settled, ~56% WR. **213 short of N=500 retrain gate** (ETA mid-July at current tempo).
-- **Open positions:** 2 long-dated event bets (Peru presidential election, NBA Rookie of the Year — both opened Apr 13; not settlement-bugged, just future events)
+## Performance Summary (as of April 30, 2026)
+- **Settled trades:** 903 (+174 since Apr 20, driven by Sprint 14e universe expansion)
+- **Win rate:** 51.1%
+- **Cumulative P&L:** −$20.32 (bleed accelerated from −$10.87 as wider universe captured more mid-price convexity-trap trades)
+- **Apr 29 UTC day:** 83 settled, 56.6% WR, −$5.19 P&L (convexity-trap signature: winning small on favorites, losing big on rare mid-price losers)
+- **Post-14f cohort (opened ≥ Apr 29):** 67/500 at 70/day → ETA N=500 ~May 6. First cohort with real absorption telemetry.
+- **Sprint 14f verification:** `_book_absorption_stale` = 0.0% (9/47,101), nonzero absorption = 98.8%, snapshot breadth = 125 tickers. Pipeline fully operational.
 - **Fill rate:** ~91% of placed orders fill
 - **By alert level:** CRITICAL dramatically outperforms ALERT
 - **Tiered sizing deployed:** CRITICAL=3 contracts, High ALERT=2, Low ALERT=1
-- **ML model:** AUC=0.809, Brier=0.180. Needs retrain post N=500. Shadow mode only.
-- **WebSocket health:** ~46 reconnects/day (keepalive timeouts), all auto-recovered
-- **Sprint 11 impact:** 56.5% WR on 278 settled shows the convexity penalty + YES-side flow penalty are holding. Edge is thin — patience window enforces statistical rigor.
-- **Sprint 14 data integrity:** 9 orphan rows recovered (6W/3L, -23¢), 0 orphans remaining, Layer 2 guard firings: 0 (Layer 1 fix holding for 2+ days).
+- **ML model:** AUC=0.809, Brier=0.180. Needs retrain post N=500 on post-14f cohort. Shadow mode only.
+- **WebSocket health:** stable post-Sprint-14e (250+ tickers subscribed)
+- **Data integrity:** All three layers (code/app/schema) — zero firings since Apr 16.
+- **Activation timeline:** ~4 weeks from Apr 30 (late May / early June) for full Kelly activation. Requires ML retrain passing Brier < 0.05 + Jaccard ≥ 0.70 — first retrain likely near-miss, realistic activation after second retrain at N=750-1000.
 
 ## Historical Performance Snapshots
 - **April 4**: 472 settled, 49.0% WR, -$8.52 cumulative
 - **April 14**: 698 settled, 50.9% WR, -$10.55 cumulative
 - **April 18**: 720 settled, 51.0% WR, -$10.98 cumulative
 - **April 20**: 729 settled, 50.9% WR, -$10.87 cumulative (Layer 3 deploy day)
+- **April 30**: 903 settled, 51.1% WR, -$20.32 cumulative (Sprint 14f verification passed, absorption pipeline operational)
 
 ## Next Steps / Roadmap
 
-### Active state (patience window, ~mid-July 2026 target)
+### Active state (patience window, N=500 gate ~May 6)
 
 - **[ONGOING] Passive monitoring** — watch for three signals, all of which should stay at zero:
   - `[STORE] REJECTED CORRUPT FILL` (Layer 2 guard firing → Layer 1 regression)
   - `sqlite3.IntegrityError: CHECK constraint failed: check_valid_fill` (Layer 3 enforcing → Layer 1+2 both regressed)
   - Orphan rows in `paper_trades` WHERE status='filled' AND fill_price IS NULL
   - Any of these firing is a P0 investigation trigger
-- **[ONGOING] Accumulate post-Sprint-11 settled trades** — 287/500 as of Apr 20. Trade tempo ~2.5/day → gate unlocks mid-July. Do NOT touch thresholds or attempt to accelerate flow.
-- **[ONGOING] Track Sprint 13c feature telemetry** — `flow_acceleration` ~24% activation, `event_relative_flow` ~67% activation, stale flag 6% (kill at 20%). Alert if flag exceeds 15%.
+- **[ONGOING] Accumulate post-14f settled trades** — 67/500 as of Apr 30. Trade tempo **~70/day** → gate unlocks ~May 6. Do NOT touch thresholds or attempt to accelerate flow.
+- **[ONGOING] Track absorption pipeline health** — `_book_absorption_stale` rate should stay near 0%. Alert if sustained above 5%.
+- **[PENDING] N=100 learning curve checkpoint** — run `PYTHONPATH=. python learning_curve.py --grid 50,100` when post-14f cohort crosses 100 settled. Pre-registered thresholds: Brier < 0.18 = absorption hypothesis supported; 0.20-0.22 = needs more N; > 0.23 = regime contamination concern.
+- **[BACKLOG] Sandbox artifact audit** — grep codebase for unbounded `SELECT SUM/COUNT` (no date filter), hardcoded `[:N]` slices, `LIMIT N` constants. Three found in 5 days (14e/14f/14g); likely more exist.
 
-### Runnable now (no live data dependency)
+### Completed (Phase ABC executed, Sprint 14c-addendum)
 
-- **Run `backtest_kelly.py --phase A`** on current settled cohort — proves kelly_contracts() math works (unit test with oracle).
-- **Run `backtest_kelly.py --phase B --sigmas 0.01,0.02,0.03,0.05,0.07,0.10`** — derives σ_max curve. Output becomes the numerical promotion gate: ML Brier-equivalent must be ≤ σ_max. Reports per-bucket breakdown to see where clipping bites.
-- **Run `backtest_kelly.py --phase C --bootstrap 10000`** — PiT empirical bucket edge. Reports Kelly vs flat on the 287 post-Sprint-11 trades with event-cluster bootstrap CI on P&L difference. Expect Kelly to skip ~20% of trades during warmup.
+- ✅ **Phase A (Oracle):** Harness verified. Terminal +5050%, zero DD. Flat: −$1.47.
+- ✅ **Phase B (σ sweep):** σ_max for <5% DD ≈ 0.08 (Brier < 0.006). ML gate tightened to Brier < 0.05.
+- ✅ **Phase C (PiT bucket):** Kelly −$477 / 55% DD on naive bucket edge. Shrunk (k=20+3√N): −$277 / 34% DD. Fundamental Theorem: shrinkage reduces variance but cannot create IC. ML model required.
+- ✅ **Sprint 14d (Bayesian shrinkage):** `src/diamond_shrinkage.py` complete + dormant. Two-Gate Stack epistemology codified.
 
-### Gated (requires N ≥ 500)
+### Gated (requires N ≥ 500 post-14f, ETA ~May 6)
 
-- **[GATE 1: N=500] Retrain ML model** — `PYTHONPATH=. python diamond_ml_train.py` with corrected Elastic Net (`l1_ratio=0.7`) on the new sample. Must pass: AUC > 0.55, Brier < 0.25, Jaccard ≥ 0.70 across CV folds.
+- **[GATE 1: N=500] Retrain ML model** — `PYTHONPATH=. python diamond_ml_train.py` on the post-14f cohort (first with real absorption features). Must pass: **Brier < 0.05** (tightened from 0.25 per Phase B σ sweep) AND **Jaccard ≥ 0.70** across CV folds. First retrain likely near-miss — realistic activation after second retrain at N=750-1000.
 - **[GATE 2: ML validated] Wire ML edge into ENTRY gate** — modify `diamond_paper.py::_execute_trade` to add `ml_edge < KELLY_MIN_EDGE_HURDLE` as pre-entry rejection. Without this, Kelly just sizes bad entries differently.
 - **[GATE 3: Entry-gate wired] Flip `KELLY_SIZING_ENABLED=true`** — wire `kelly_contracts()` into `_execute_trade()` sizing path, replacing the flat tiered logic.
+- **[GATE 4: Backtest re-validates]** — run `backtest_kelly.py` Phase C on post-14f data with ML-backed edge estimator. MaxDD must compress vs flat. Then flip `KELLY_SIZING_ENABLED=true`.
 
 ### Do NOT
 
@@ -825,4 +1073,62 @@ On Linux with systemd cgroups, `PRAGMA mmap_size=N` causes file-backed mmap page
 
 ## Milestone Reports
 
-End-of-sprint / phase / postmortem HTML summaries live in `~/Documents/quant/diamond/reports/YYYY_MM_DD_<slug>.html`. DIAMOND's `.gitignore` does not block HTML files, so reports are tracked by default. See `~/Documents/quant/CLAUDE.md` § Milestone Reports for the full cross-project standard (required sections, palette, triggers). DIAMOND is a frequent candidate for reports — each Sprint deployment (Sprint 11 Sharpe cliff, Sprint 12 infrastructure, Sprint 13 collinearity fixes) merits one.
+End-of-sprint / phase / postmortem HTML summaries live in `~/Documents/quant/diamond/reports/YYYY_MM_DD_<slug>.html`. DIAMOND's `.gitignore` does not block HTML files, so reports are tracked by default. See `~/Documents/quant/CLAUDE.md` § Milestone Reports for the full cross-project standard (required sections, palette, triggers).
+
+**Reports filed:**
+- `2026_04_21_kelly_phase_abc.html` — Sprint 14c/14d Kelly backtest (Phase A/B/C + shrinkage)
+- `2026_04_23_d1_status_update.html` — Mid-Sprint-14 status update
+- `2026_04_26_ml_learning_curve.html` — Sprint 14e diagnostic, early learning curve sweep
+- **`2026_05_13_diamond_strategy_autopsy.html`** — Final strategy autopsy + shutdown record
+
+## Institutional Assets (Transferable to BERYL/CITRINE)
+
+DIAMOND failed at the trading layer. The infrastructure built to test the hypothesis is the lasting asset. The following components are designed to carry over directly:
+
+### Quantitative methodology
+
+| Asset | Source | Transferability to BERYL/CITRINE |
+|---|---|---|
+| **Point-in-Time CV** | `src/diamond_ml.py:488` | Direct — port to BERYL's ML scoring layer if/when one is built |
+| **Null-importance permutation test** | `src/diamond_ml.py` | Direct — applies to any feature-selection layer |
+| **Cohort-burn discipline** | Sprints 14e/14f/14h | Conceptual — any time a regime change occurs (config change, data fix), reset the training cohort |
+| **Two-Gate Stack** | Sprint 14d | Direct — IC gate AND variance gate are universal for activating Kelly sizing |
+| **Pre-registered falsifiable thresholds** | N=300 Brier matrix | Cultural — commit thresholds before running the experiment |
+| **Bayesian shrinkage estimator** | `src/diamond_shrinkage.py` | Reusable — Laplace smoothing with k=20+3√N pseudocount applies anywhere bucket-WR is the input |
+
+### Execution / infrastructure
+
+| Asset | Source | Transferability |
+|---|---|---|
+| **Three-layer data integrity** | Sprint 14/14b | Conceptual — code fix + app guard + schema CHECK on any DB-persisted state |
+| **Two-tier kill switch** (daily soft + cumulative hard) | Sprint 14g | Direct — port the two-tier pattern to BERYL/CITRINE if not already present |
+| **Task-death watchdog** | Sprint 14h `_task_death_logger` | Conceptual — BERYL/CITRINE use synchronous Python (1d bars), not asyncio, so the exact code doesn't apply. The PATTERN — silent failures must alert — does apply. |
+| **CancelledError-aware exception handling** | Sprint 14h | Conceptual — any long-running asyncio loop should explicitly catch CancelledError |
+| **Telemetry against absence** (`_book_absorption_stale` canary pattern) | Sprint 14e | Direct — design canaries that fire when the system is silently broken, not just when it's loudly broken |
+| **PiT CV cohort cutoff epochs** | learning_curve.py `--min-opened-at` | Direct — preserves the ability to retrain on a specific data regime |
+
+### Operator-side lessons
+
+1. **When the comfortable explanation doesn't fit the facts, the explanation is wrong, not the facts.** (Lesson from Sprint 14g narrative-fallacy diagnosis.)
+2. **Monitor for absence, not just presence.** "Is the service running?" is useless. "Is the service doing real work in the last N minutes?" is the right check.
+3. **Burnout is a real failure mode.** 4 sandbox-era bugs in 9 days (14e/f/g/h) suggests the operator cadence was unsustainable. Build margin into future projects.
+4. **Separate the expected value of the strategy from the expected value of the engineer.** Strategy can fail; engineer can succeed. DIAMOND was this.
+
+## Operational Notes (Post-Retirement)
+
+If for some reason DIAMOND needs to be revived for further research:
+
+```bash
+# Restore from archive
+ssh ubuntu@129.158.40.51
+cd /home/ubuntu/kalshi-diamond
+cp diamond_trades.db.shutdown-2026-05-13 diamond_trades.db.research
+
+# Re-enable services (NOT recommended unless pivoting to new strategy)
+sudo systemctl enable diamond-monitor diamond-dashboard
+sudo systemctl start diamond-monitor diamond-dashboard
+```
+
+The Kalshi API credentials remain in `.env` and the systemd unit files are unchanged — only the `enabled` state was flipped to `disabled`. EMERALD still reads DIAMOND's `.env` for Kalshi REST access; this remains intact.
+
+⚠️ **Do not revive DIAMOND for live trading.** The hypothesis is empirically falsified. Any further work should be research-only (e.g., post-hoc feature analysis on the archived dataset), or should constitute a new strategy with a new repo/name.

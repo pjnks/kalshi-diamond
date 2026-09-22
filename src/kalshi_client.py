@@ -327,6 +327,14 @@ class KalshiWSClient:
         self._ws = None
         self._msg_id = 1
         self._running = False
+        # Sprint 14e (2026-04-26): track desired subscription state so
+        # (a) sync_subscriptions() can compute add/remove deltas vs market_cache
+        # (b) reconnect loop can restore the FULL desired set, not just the
+        #     initial tickers passed to connect(). Fixes the 67-vs-153 ticker
+        #     gap where market_cache discovered 153 markets but WS stayed
+        #     subscribed to whatever was active at startup.
+        self._desired_tickers: set[str] = set()
+        self._channels: list[str] = ["trade"]
 
     async def connect(
         self,
@@ -364,8 +372,21 @@ class KalshiWSClient:
                     self._ws_error_count = 0  # Reset on successful stable connection
                     self._ws_error_alerted = False
 
+                    # Sprint 14e: on FIRST connect, seed desired state from
+                    # the tickers arg. On RECONNECT, restore the full desired
+                    # set (which may have grown via sync_subscriptions while
+                    # we were disconnected). Channels persist across reconnects.
                     if tickers:
-                        await self.subscribe(channels, tickers)
+                        self._desired_tickers.update(tickers)
+                        self._channels = list(channels)
+
+                    if self._desired_tickers:
+                        # Re-subscribe everything in chunks of 500 (well under
+                        # any reasonable WS message size limit).
+                        all_tickers = list(self._desired_tickers)
+                        for i in range(0, len(all_tickers), 500):
+                            chunk = all_tickers[i:i + 500]
+                            await self._send_subscribe(self._channels, chunk)
 
                     await self._listen()
 
@@ -393,37 +414,65 @@ class KalshiWSClient:
                         pass  # Don't let alert failure block reconnection
                 await asyncio.sleep(10)
 
-    async def subscribe(self, channels: list[str], tickers: list[str]):
-        """Subscribe to channels for given market tickers."""
+    async def _send_subscribe(self, channels: list[str], tickers: list[str]):
+        """Internal: send subscribe wire message without touching desired-state."""
         if not self._ws:
             raise RuntimeError("WebSocket not connected")
-
         msg = {
             "id": self._msg_id,
             "cmd": "subscribe",
-            "params": {
-                "channels": channels,
-                "market_tickers": tickers,
-            },
+            "params": {"channels": channels, "market_tickers": tickers},
         }
         await self._ws.send(json.dumps(msg))
         log.info(f"Subscribed to {channels} for {len(tickers)} tickers")
         self._msg_id += 1
 
+    async def subscribe(self, channels: list[str], tickers: list[str]):
+        """Subscribe to channels for given market tickers + record desired state."""
+        await self._send_subscribe(channels, tickers)
+        self._desired_tickers.update(tickers)
+        self._channels = list(channels)
+
     async def unsubscribe(self, channels: list[str], tickers: list[str]):
-        """Unsubscribe from channels."""
+        """Unsubscribe from channels + remove from desired state."""
         if not self._ws:
+            self._desired_tickers.difference_update(tickers)
             return
         msg = {
             "id": self._msg_id,
             "cmd": "unsubscribe",
-            "params": {
-                "channels": channels,
-                "market_tickers": tickers,
-            },
+            "params": {"channels": channels, "market_tickers": tickers},
         }
         await self._ws.send(json.dumps(msg))
+        log.info(f"Unsubscribed from {channels} for {len(tickers)} tickers")
         self._msg_id += 1
+        self._desired_tickers.difference_update(tickers)
+
+    async def sync_subscriptions(self, target_tickers: list[str]) -> dict:
+        """Sprint 14e: reconcile WS subscriptions against a target set.
+
+        Subscribes to any tickers in `target_tickers` not currently subscribed,
+        unsubscribes from any currently-subscribed tickers not in `target_tickers`.
+
+        Safe to call repeatedly. No-op if state already matches. Idempotent.
+        Returns: {'added': N, 'removed': M, 'unchanged': K} for telemetry.
+        """
+        target = set(target_tickers)
+        to_add = target - self._desired_tickers
+        to_remove = self._desired_tickers - target
+        unchanged = len(self._desired_tickers & target)
+
+        if to_add and self._ws:
+            add_list = list(to_add)
+            for i in range(0, len(add_list), 500):
+                chunk = add_list[i:i + 500]
+                await self._send_subscribe(self._channels, chunk)
+            self._desired_tickers.update(to_add)
+
+        if to_remove and self._ws:
+            await self.unsubscribe(self._channels, list(to_remove))
+
+        return {"added": len(to_add), "removed": len(to_remove), "unchanged": unchanged}
 
     async def disconnect(self):
         """Gracefully close the WebSocket."""

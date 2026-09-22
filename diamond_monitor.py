@@ -368,7 +368,16 @@ async def refresh_markets(category: str | None = None):
 
 
 async def metadata_refresh_loop(category: str | None = None):
-    """Periodically refresh market metadata and recompute profiles."""
+    """Periodically refresh market metadata and recompute profiles.
+
+    Sprint 14h (2026-05-05): explicit CancelledError handling — same
+    vulnerability as orderbook_poll_loop. `refresh_markets()` issues
+    HTTP calls via `rest._request()`, which can raise CancelledError
+    if the aiohttp session recycles mid-flight (every 30 min). Without
+    explicit handling, that exception bypasses `except Exception` and
+    silently kills the loop.
+    """
+    log.info("[METADATA_REFRESH] Loop started")
     while running:
         try:
             # Prune expired fetch failures (older than 60 min) instead of clearing all
@@ -390,19 +399,54 @@ async def metadata_refresh_loop(category: str | None = None):
             # Prune old data (VACUUM removed — run manually when needed)
             store.prune_old_data()
 
+        except asyncio.CancelledError:
+            if not running:
+                log.info("[METADATA_REFRESH] Cancelled during shutdown — exiting")
+                raise
+            log.warning(
+                "[METADATA_REFRESH] CancelledError while running=True "
+                "(likely aiohttp session recycle); continuing"
+            )
         except Exception as e:
             log.error(f"Metadata refresh error: {e}")
+        except BaseException as e:
+            log.error(
+                f"[METADATA_REFRESH] UNEXPECTED {type(e).__name__}: {e}",
+                exc_info=True,
+            )
 
         await asyncio.sleep(METADATA_REFRESH_SEC)
 
+    log.info("[METADATA_REFRESH] Exiting (running=False)")
+
 
 async def orderbook_poll_loop():
-    """Periodically poll order books for active markets."""
+    """Periodically poll order books for active markets.
+
+    Sprint 14f (2026-04-29): widened from a hardcoded 30-ticker cap to the
+    full active universe via `market_cache.keys()`, and tightened per-request
+    sleep from 0.5s → 0.1s.
+
+    Sprint 14h (2026-05-05): catch asyncio.CancelledError in the inner loop
+    so session recycling mid-request can no longer kill the task. Add
+    startup banner + periodic heartbeat logging so silent task death is
+    detectable. Root cause was: aiohttp session recycle (every 30 min)
+    closes in-flight requests, raising CancelledError. CancelledError is
+    a BaseException (not Exception), so the prior `except Exception` did
+    NOT catch it. The task died silently at May 1 18:14 UTC, contaminating
+    ~83% of the post-14f cohort with all-zero absorption features before
+    the Sprint 14e _book_absorption_stale canary surfaced the problem.
+    """
+    log.info("[ORDERBOOK_POLL] Loop started")
+    iteration = 0
     while running:
+        iteration += 1
+        written = errors = cancels = 0
         try:
-            active_tickers = store.get_all_active_tickers()
-            # Limit polling to most active markets to respect rate limits
-            tickers_to_poll = active_tickers[:30]
+            # Poll the CURRENT active market universe, not a stale [:30] slice
+            # of historical tickers. market_cache is refreshed by
+            # metadata_refresh_loop every METADATA_REFRESH_SEC.
+            tickers_to_poll = list(market_cache.keys())
 
             for ticker in tickers_to_poll:
                 if not running:
@@ -410,14 +454,54 @@ async def orderbook_poll_loop():
                 try:
                     book = await rest.get_orderbook(ticker)
                     store.insert_book_snapshot(ticker, book.get("orderbook", book))
+                    written += 1
+                except asyncio.CancelledError:
+                    # In-flight HTTP request cancelled (typically aiohttp
+                    # session recycle at SESSION_RECYCLE_SEC = 30 min).
+                    # CancelledError is BaseException, NOT Exception — it
+                    # bypasses `except Exception` and would otherwise kill
+                    # the task. Catch explicitly here, log, and continue.
+                    cancels += 1
+                    log.warning(
+                        f"[ORDERBOOK_POLL] Request cancelled for {ticker} "
+                        "(likely aiohttp session recycle); continuing"
+                    )
                 except Exception as e:
+                    errors += 1
                     log.debug(f"Orderbook fetch failed for {ticker}: {e}")
-                await asyncio.sleep(0.5)  # 0.5s between requests
+                await asyncio.sleep(0.1)  # 0.1s between requests (10 req/sec, vs 20/sec cap)
 
-        except Exception as e:
-            log.error(f"Orderbook poll error: {e}")
+            # Heartbeat every 10 iterations (~5 min at REST_POLL_INTERVAL_SEC=30).
+            # Absence of heartbeat = task is dead, watchdog should alarm.
+            if iteration % 10 == 1:
+                log.info(
+                    f"[ORDERBOOK_POLL] iter={iteration} written={written} "
+                    f"errors={errors} cancels={cancels} tickers={len(tickers_to_poll)}"
+                )
+
+        except asyncio.CancelledError:
+            # Top-level CancelledError. Two cases:
+            # 1. Real shutdown (running=False) — honor it, exit cleanly.
+            # 2. Stray cancellation while running=True — log loudly, continue.
+            if not running:
+                log.info("[ORDERBOOK_POLL] Cancelled during shutdown — exiting")
+                raise
+            log.error(
+                "[ORDERBOOK_POLL] STRAY CancelledError while running=True; "
+                "loop continuing (this should not happen)"
+            )
+        except BaseException as e:
+            # Catch-all to prevent silent task death. Includes Exception
+            # plus any other BaseException subclass (KeyboardInterrupt,
+            # SystemExit) — better to keep the loop alive than die silently.
+            log.error(
+                f"[ORDERBOOK_POLL] UNEXPECTED {type(e).__name__}: {e}",
+                exc_info=True
+            )
 
         await asyncio.sleep(REST_POLL_INTERVAL_SEC)
+
+    log.info("[ORDERBOOK_POLL] Exiting (running=False)")
 
 
 async def status_report_loop():
@@ -554,14 +638,64 @@ async def main(category: str | None = None):
     startup_ts = time.time()
     log.info(f"Warmup: alerts suppressed for {WARMUP_SEC}s while baselines stabilize")
 
-    # Start background tasks
+    # Sprint 14h (2026-05-05): Task death watchdog. The orderbook_poll_loop
+    # died silently at May 1 18:14 UTC when an aiohttp session recycle raised
+    # asyncio.CancelledError inside `await rest.get_orderbook()`. CancelledError
+    # is BaseException (not Exception), so it bypassed the loop's
+    # `except Exception` and killed the task. asyncio.gather(return_exceptions=
+    # True) in monitor() then suppressed the death notification. The failure
+    # went unnoticed for ~3 days until the Sprint 14e `_book_absorption_stale`
+    # canary surfaced 100% staleness.
+    #
+    # This watchdog attaches a done_callback to every background task that
+    # fires a CRITICAL Pushover alert if the task dies unexpectedly. Combined
+    # with Patch 1's CancelledError handling, this is defense-in-depth: even
+    # if a future task hits a similar bug, the death is caught within seconds.
+    def _task_death_logger(name: str):
+        """Return a done_callback that alerts on unexpected task death."""
+        def _cb(t: asyncio.Task):
+            if t.cancelled():
+                log.info(f"[TASK_WATCHDOG] {name} cancelled (clean shutdown)")
+                return
+            exc = t.exception()
+            if exc is not None:
+                log.critical(
+                    f"[TASK_WATCHDOG] {name} DIED: {type(exc).__name__}: {exc}",
+                    exc_info=exc,
+                )
+                try:
+                    from src.diamond_alerts import _pushover
+                    _pushover(
+                        f"DIAMOND task died: {name}",
+                        f"{type(exc).__name__}: {exc}",
+                        priority=1,
+                    )
+                except Exception as alert_err:
+                    log.error(f"[TASK_WATCHDOG] Pushover alert failed: {alert_err}")
+            elif not running:
+                log.info(f"[TASK_WATCHDOG] {name} exited cleanly")
+            else:
+                log.error(
+                    f"[TASK_WATCHDOG] {name} EXITED UNEXPECTEDLY while "
+                    "running=True (no exception raised, but infinite loop "
+                    "exited anyway)"
+                )
+        return _cb
+
+    def _spawn(coro, name: str) -> asyncio.Task:
+        """Create a task with the death-watchdog callback attached."""
+        t = asyncio.create_task(coro, name=name)
+        t.add_done_callback(_task_death_logger(name))
+        return t
+
+    # Start background tasks (each wrapped with death watchdog)
     tasks = [
-        asyncio.create_task(metadata_refresh_loop(category)),
-        asyncio.create_task(orderbook_poll_loop()),
-        asyncio.create_task(status_report_loop()),
+        _spawn(metadata_refresh_loop(category), "metadata_refresh_loop"),
+        _spawn(orderbook_poll_loop(), "orderbook_poll_loop"),
+        _spawn(status_report_loop(), "status_report_loop"),
     ]
     if paper_engine is not None:
-        tasks.append(asyncio.create_task(paper_engine.poll_loop()))
+        tasks.append(_spawn(paper_engine.poll_loop(), "paper_poll_loop"))
 
     # ML scorer daily retrain (if enabled)
     try:
@@ -593,23 +727,25 @@ async def main(category: str | None = None):
                     except Exception as e:
                         log.error(f"[ML] Retrain failed: {e}")
                     await asyncio.sleep(86400)  # Daily
-            tasks.append(asyncio.create_task(ml_retrain_loop()))
+            tasks.append(_spawn(ml_retrain_loop(), "ml_retrain_loop"))
     except ImportError:
         pass
 
-    # Start WebSocket — subscribe in batches (WS may have limits)
+    # Start WebSocket — Sprint 14e (2026-04-26): subscribe to ALL discovered
+    # tickers at startup (was capped at first 100, leaving 56% of markets
+    # unsubscribed). The KalshiWSClient now chunks internally if needed.
     ws = KalshiWSClient(on_trade=on_trade)
-    BATCH_SIZE = 100
-    first_batch = tickers[:BATCH_SIZE]
-    remaining = tickers[BATCH_SIZE:]
 
     async def ws_with_subscribe():
-        """WebSocket connection loop — auto-restarts if cancelled by stale detection."""
+        """WebSocket connection loop — auto-restarts if cancelled by stale detection.
+
+        Note: ws.connect() also restores `ws._desired_tickers` on reconnect, so
+        any subscriptions added by resubscribe_loop() while connected are
+        preserved across stale-detection restarts.
+        """
         while running:
             try:
-                # connect() handles reconnection internally for normal errors;
-                # stale detection cancels this task to force a full restart
-                await ws.connect(tickers=first_batch, channels=["trade"])
+                await ws.connect(tickers=tickers, channels=["trade"])
             except asyncio.CancelledError:
                 if not running:
                     raise  # Clean shutdown — propagate
@@ -617,9 +753,34 @@ async def main(category: str | None = None):
                 await asyncio.sleep(5)
                 continue
 
-    ws_task = asyncio.create_task(ws_with_subscribe())
+    ws_task = _spawn(ws_with_subscribe(), "ws_with_subscribe")
     _ws_task_ref = ws_task
     tasks.append(ws_task)
+
+    # Sprint 14e: keep WS subscriptions in sync with discovered market_cache.
+    # Without this, new markets appearing post-startup (sports events,
+    # political markets, etc.) are never subscribed to → 67-vs-153 ticker gap.
+    async def resubscribe_loop():
+        """Reconcile WS subscriptions against market_cache every refresh interval."""
+        # Wait one refresh interval before first sync so initial subscribe completes
+        await asyncio.sleep(METADATA_REFRESH_SEC)
+        while running:
+            try:
+                target = list(market_cache.keys())
+                if target:
+                    delta = await ws.sync_subscriptions(target)
+                    if delta["added"] or delta["removed"]:
+                        log.info(
+                            f"[RESUB] WS subscriptions synced: "
+                            f"+{delta['added']} new, -{delta['removed']} expired, "
+                            f"={delta['unchanged']} unchanged "
+                            f"(target={len(target)}, subscribed={len(ws._desired_tickers)})"
+                        )
+            except Exception as e:
+                log.error(f"resubscribe_loop error: {e}", exc_info=True)
+            await asyncio.sleep(METADATA_REFRESH_SEC)
+
+    tasks.append(_spawn(resubscribe_loop(), "resubscribe_loop"))
 
     # Handle shutdown — use asyncio-safe signal handlers (not signal.signal)
     loop = asyncio.get_running_loop()

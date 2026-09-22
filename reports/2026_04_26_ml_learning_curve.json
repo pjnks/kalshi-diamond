@@ -1,0 +1,81 @@
+[
+  {
+    "n_target": 50,
+    "n_actual": 50,
+    "error": "CV completed with zero valid folds (0 attempted). PiT purge may be too aggressive for N=50.",
+    "cv_brier": null,
+    "cv_brier_std": null,
+    "cv_auc": null,
+    "cv_auc_std": null,
+    "n_features_kept": null,
+    "features_kept": null,
+    "win_rate": null,
+    "naive_brier": null
+  },
+  {
+    "n_target": 100,
+    "n_actual": 100,
+    "error": "CV completed with zero valid folds (0 attempted). PiT purge may be too aggressive for N=100.",
+    "cv_brier": null,
+    "cv_brier_std": null,
+    "cv_auc": null,
+    "cv_auc_std": null,
+    "n_features_kept": null,
+    "features_kept": null,
+    "win_rate": null,
+    "naive_brier": null
+  },
+  {
+    "n_target": 150,
+    "n_actual": 150,
+    "error": null,
+    "cv_brier": 0.18834662007128025,
+    "cv_brier_std": 0.0,
+    "cv_auc": 0.7443181818181819,
+    "cv_auc_std": 0.0,
+    "n_features_kept": 3,
+    "features_kept": [
+      "flow_acceleration",
+      "category_target_enc",
+      "score_x_implied_prob"
+    ],
+    "win_rate": 0.62,
+    "naive_brier": 0.23560000000000003
+  },
+  {
+    "n_target": 200,
+    "n_actual": 200,
+    "error": null,
+    "cv_brier": 0.20270691954468253,
+    "cv_brier_std": 0.02325680100854025,
+    "cv_auc": 0.7690319548872181,
+    "cv_auc_std": 0.07507697870832652,
+    "n_features_kept": 4,
+    "features_kept": [
+      "size_concentration",
+      "flow_acceleration",
+      "category_target_enc",
+      "score_x_implied_prob"
+    ],
+    "win_rate": 0.605,
+    "naive_brier": 0.23897500000000002
+  },
+  {
+    "n_target": 250,
+    "n_actual": 250,
+    "error": null,
+    "cv_brier": 0.18669536491717073,
+    "cv_brier_std": 0.030867283939814333,
+    "cv_auc": 0.8022118361514646,
+    "cv_auc_std": 0.07619571385257792,
+    "n_features_kept": 4,
+    "features_kept": [
+      "flow_acceleration",
+      "book_absorption_depletion",
+      "category_target_enc",
+      "score_x_implied_prob"
+    ],
+    "win_rate": 0.592,
+    "naive_brier": 0.24153599999999997
+  }
+]

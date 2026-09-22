@@ -409,6 +409,140 @@ def event_relative_flow(
     return _clamp(score)
 
 
+# ── Order Book Absorption Metrics (Sprint 14e — 2026-04-26) ──────────
+#
+# Question: when trades hit the book, does the book replenish or get depleted?
+# This is informational because:
+#   - Replenishment = liquidity providers willing to defend the price (uninformed flow signal)
+#   - Depletion    = liquidity providers pulling back (informed flow signal)
+#   - Negative depletion (book grows) = market makers loading the OTHER side
+#
+# Sprint 13c precedent: shadow-mode only. Logged to features_json for ML
+# training, NOT in SCORER_WEIGHTS. Composite score and live execution
+# untouched. ML retrain at N=500 will let Ridge regression decide which
+# variant has IC after null-importance testing.
+#
+# Single-extraction pattern: fetch book@t0, book@now, trades-in-window ONCE,
+# compute all 4 candidate metrics from the same data. Caller stuffs the
+# returned dict directly into the features dict.
+
+
+def book_absorption_metrics(
+    *,
+    book_now: dict | None,
+    book_prev: dict | None,
+    trades_in_window: list[dict],
+    window_sec: float = 60.0,
+) -> dict[str, float]:
+    """Compute 4 candidate order-book-absorption variants from shared data.
+
+    Args:
+        book_now: Latest order book (yes_bids, no_bids levels). May be None.
+        book_prev: Order book snapshot from `window_sec` ago. May be None.
+        trades_in_window: List of trade dicts in [now - window_sec, now].
+                          Each must have 'count' and 'taker_side' ('yes' or 'no').
+        window_sec: Time window in seconds (default 60s).
+
+    Returns:
+        Dict with 5 keys:
+          - book_absorption_static   : Variant A — gross flow vs depth
+          - book_absorption_depletion: Variant B — net depth depletion rate
+          - book_absorption_sided    : Variant C — side-weighted (one-sidedness)
+          - book_absorption_replenish: Variant D — replenishment ratio
+          - _book_absorption_stale   : 1 if book_prev is missing/stale, 0 otherwise
+                                       (kill-switch telemetry, NOT a model feature)
+
+    All values are clamped to [-1.0, 1.0] for ML compatibility (avoids
+    Ridge weights blowing up on outliers in low-liquidity markets).
+    Empty/missing data → 0.0 (matches sparse-feature handling in
+    flow_acceleration / event_relative_flow).
+    """
+    # ── Data validity guards ─────────────────────────────────────
+    if not book_now or not book_prev:
+        return {
+            "book_absorption_static": 0.0,
+            "book_absorption_depletion": 0.0,
+            "book_absorption_sided": 0.0,
+            "book_absorption_replenish": 0.0,
+            "_book_absorption_stale": 1.0,
+        }
+
+    # Sum depth from yes_bids / no_bids levels (each level is [price, qty])
+    def _depth(levels: list) -> float:
+        return sum(float(l[1]) for l in (levels or []) if l)
+
+    yes_now = _depth(book_now.get("yes_bids"))
+    no_now = _depth(book_now.get("no_bids"))
+    yes_prev = _depth(book_prev.get("yes_bids"))
+    no_prev = _depth(book_prev.get("no_bids"))
+    total_now = yes_now + no_now
+    total_prev = yes_prev + no_prev
+
+    # Sum trade volume by side
+    yes_volume = sum(int(t.get("count", 0)) for t in trades_in_window
+                     if t.get("taker_side") == "yes")
+    no_volume = sum(int(t.get("count", 0)) for t in trades_in_window
+                    if t.get("taker_side") == "no")
+    total_volume = yes_volume + no_volume
+
+    # Edge case: no trades or no book depth
+    if total_volume == 0 or total_prev < 10.0:
+        return {
+            "book_absorption_static": 0.0,
+            "book_absorption_depletion": 0.0,
+            "book_absorption_sided": 0.0,
+            "book_absorption_replenish": 0.0,
+            "_book_absorption_stale": 0.0,
+        }
+
+    # ── Variant A: Static absorption ratio ───────────────────────
+    # "How much flow per unit of standing depth?"
+    # High = aggressive flow on thin book (regime change?)
+    # Low  = normal flow on healthy book
+    static = total_volume / total_prev
+    variant_a = _clamp(static / 0.5)  # rescale: 0.5x = max signal
+
+    # ── Variant B: Net depth depletion rate ──────────────────────
+    # "Is the book getting eaten faster than it's being added to?"
+    # Positive = depletion (bearish liquidity); negative = growth (defended level)
+    depletion = (total_prev - total_now) / max(window_sec, 1.0)
+    variant_b = _clamp(depletion / 5.0)  # rescale: 5 contracts/sec depletion = max
+
+    # ── Variant C: Side-weighted absorption (one-sidedness) ──────
+    # "Is the flow eating one side disproportionately to its depth?"
+    # +1 = yes-side flow eating yes-depth, -1 = no-side eating no-depth.
+    # Captures directional informed-flow pressure separately from imbalance.
+    yes_pressure = yes_volume / max(yes_prev, 1.0)
+    no_pressure = no_volume / max(no_prev, 1.0)
+    pressure_diff = yes_pressure - no_pressure
+    variant_c = _clamp(pressure_diff / 1.0)  # ±1.0 contracts-per-depth-unit = max
+
+    # ── Variant D: Replenishment ratio ───────────────────────────
+    # "Did the book defend itself against the flow?"
+    # Most information-rich, most fragile to snapshot timing.
+    #   ~1.0 = perfect replenishment (uninformed flow met by limit orders)
+    #   ~0.0 = no replenishment (informed flow ate quietly)
+    #   <0   = catastrophic mismatch (book grew so much "expected" went negative)
+    expected_depth = total_prev - total_volume  # what depth SHOULD be after net flow
+    if expected_depth > 0:
+        replenish = total_now / expected_depth
+        # Center on 1.0 (replenished), positive = over-replenished (defense),
+        # negative = under-replenished (informed flow). Then scale to [-1, 1].
+        variant_d = _clamp((replenish - 1.0) / 1.0)  # ±1.0 = max signal
+    else:
+        # Catastrophic case: total flow exceeded available depth.
+        # Treat as "informed flow blew through the book" → strong negative signal.
+        variant_d = -1.0
+
+    return {
+        "book_absorption_static": float(variant_a),
+        "book_absorption_depletion": float(variant_b),
+        "book_absorption_sided": float(variant_c),
+        "book_absorption_replenish": float(variant_d),
+        "_book_absorption_stale": 0.0,
+    }
+
+
 # ── Composite Score ───────────────────────────────────────────────────
 
 
@@ -653,6 +787,23 @@ class FeatureEngine:
                 features["event_relative_flow"] = event_relative_flow(
                     ticker, ticker_vol, sibling_vols,
                 )
+
+        # ── Compute order-book absorption metrics (Sprint 14e, shadow only)
+        # 4 candidate variants, all logged to features_json for ML training.
+        # NOT in SCORER_WEIGHTS — composite score and live entry/exit
+        # untouched. Window: 60s (matches anomaly evaluation cadence).
+        if FEATURE_ENABLED.get("book_absorption", True):
+            ABS_WINDOW_SEC = 60.0
+            book_prev = self._store.get_book_snapshot_at(ticker, now - ABS_WINDOW_SEC)
+            trades_in_window = [t for t in recent_trades
+                                if (now - t.get("ts", 0)) <= ABS_WINDOW_SEC]
+            absorption = book_absorption_metrics(
+                book_now=book,
+                book_prev=book_prev,
+                trades_in_window=trades_in_window,
+                window_sec=ABS_WINDOW_SEC,
+            )
+            features.update(absorption)  # spreads 4 metrics + 1 stale flag
 
         # Get entry price for probability-conditioned penalty
         entry_price_cents = trade.get("yes_price") or trade.get("no_price")

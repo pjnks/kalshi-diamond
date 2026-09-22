@@ -27,6 +27,7 @@ from diamond_config import (
     PAPER_MAX_PER_EVENT,
     PAPER_MAX_TRADES_PER_5MIN,
     PAPER_MAX_UNREALIZED_CENTS,
+    PAPER_MAX_CUMULATIVE_CENTS,
     PAPER_MAX_POSITIONS,
     PAPER_MIN_ALERT_LEVEL,
     PAPER_MIN_PRICE_CENTS,
@@ -274,8 +275,33 @@ class PaperTradingEngine:
                                                  "burst_throttle", f"{recent_trade_count}/{PAPER_MAX_TRADES_PER_5MIN} in 5min")
                 return
 
-            # Kill switch: total daily P&L (realized + unrealized) drops below -$20
-            # Use tiered count to match actual order size
+            # ── Sprint 14g (2026-05-01): TWO-TIER KILL SWITCH ─────────────
+            # Tier 1: cumulative all-time P&L hard halt (no auto-reset).
+            # Tier 2: daily P&L soft halt (resets at UTC midnight).
+            # Both must pass; cumulative checked first because it's a
+            # structural-failure signal, not a "bad day" signal.
+
+            cumulative_pnl = stats.get("total_pnl_cents", 0)
+            if cumulative_pnl < -PAPER_MAX_CUMULATIVE_CENTS:
+                log.error(f"[PAPER] KILL SWITCH (CUMULATIVE): all-time P&L {cumulative_pnl:+d}¢ "
+                          f"< -${PAPER_MAX_CUMULATIVE_CENTS/100:.0f} max drawdown. "
+                          f"NO ENTRIES UNTIL MANUAL REVIEW.")
+                if self._alerts:
+                    self._alerts.dispatch_alert(
+                        ticker="DIAMOND-KILLSWITCH-CUMULATIVE",
+                        alert_level="CRITICAL",
+                        composite_score=1.0,
+                        features={"reason": "cumulative_max_drawdown"},
+                        market_title=f"Paper Trading HARD HALT — cumulative P&L {cumulative_pnl:+d}¢ < -${PAPER_MAX_CUMULATIVE_CENTS/100:.0f}. Manual review required.",
+                    )
+                self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
+                                                 "kill_switch_cumulative",
+                                                 f"CUMULATIVE P&L {cumulative_pnl:+d}¢ < -${PAPER_MAX_CUMULATIVE_CENTS/100:.0f} MAX DRAWDOWN")
+                return
+
+            # Daily soft kill switch — Sprint 14g fix: stats now correctly
+            # reports today_realized + unrealized via the get_paper_stats
+            # SQL fix in diamond_store.py (was silently summing all-time).
             if score >= 0.78:
                 est_count = 3
             elif score >= 0.65:
@@ -286,21 +312,21 @@ class PaperTradingEngine:
             total_daily_pnl = stats.get("total_daily_pnl_cents", 0)
             new_daily_pnl = total_daily_pnl - estimated_cost  # Conservative: assume new trade loses cost
 
-            # Kill switch at -$20 daily loss
             if new_daily_pnl < -PAPER_MAX_UNREALIZED_CENTS:
-                log.warning(f"[PAPER] KILL SWITCH: daily loss cap reached! "
-                           f"Current P&L: {total_daily_pnl:+d}¢ - New cost: {estimated_cost}¢ = {new_daily_pnl:+d}¢ < -${PAPER_MAX_UNREALIZED_CENTS/100:.2f}")
-                # Send CRITICAL alert via dispatch
+                log.warning(f"[PAPER] KILL SWITCH (DAILY): daily loss cap reached! "
+                           f"Today P&L: {total_daily_pnl:+d}¢ - new cost: {estimated_cost}¢ = {new_daily_pnl:+d}¢ < -${PAPER_MAX_UNREALIZED_CENTS/100:.2f}. "
+                           f"Resets at UTC midnight.")
                 if self._alerts:
                     self._alerts.dispatch_alert(
-                        ticker="DIAMOND-KILLSWITCH",
+                        ticker="DIAMOND-KILLSWITCH-DAILY",
                         alert_level="CRITICAL",
                         composite_score=1.0,
                         features={"reason": "daily_loss_cap"},
                         market_title=f"Paper Trading Kill Switch — Daily P&L {new_daily_pnl:+d}¢ would exceed -${PAPER_MAX_UNREALIZED_CENTS/100:.2f} limit",
                     )
                 self._store.insert_skipped_trade(ticker, title, taker_side, price_int, score, level,
-                                                 "kill_switch", f"P&L {new_daily_pnl:+d}¢ < -${PAPER_MAX_UNREALIZED_CENTS/100:.0f}")
+                                                 "kill_switch_daily",
+                                                 f"DAILY P&L {new_daily_pnl:+d}¢ < -${PAPER_MAX_UNREALIZED_CENTS/100:.0f}")
                 return
 
             # Mark as pending to prevent race conditions

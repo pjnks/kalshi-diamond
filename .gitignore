@@ -34,3 +34,7 @@ nohup.out
 
 # Claude
 .claude/
+
+# Archived DB snapshots (kept on VM + Mac, too large for GitHub)
+archive/
+*.db.*.gz

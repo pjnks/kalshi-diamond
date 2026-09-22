@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#f7fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1a202c;">
+<div style="max-width:720px;margin:0 auto;padding:24px 16px;background:#ffffff;">
+
+<!-- HEADER -->
+<div style="border-bottom:3px solid #00b894;padding-bottom:12px;margin-bottom:20px;">
+  <h1 style="margin:0 0 4px 0;color:#0f766e;font-size:24px;letter-spacing:-0.01em;">DIAMOND (D1) — Status Update</h1>
+  <div style="color:#4a5568;font-size:13px;">Kalshi anomaly detection + live trading · 2026-04-23 · 732 settled trades · Patience window active</div>
+</div>
+
+<!-- TL;DR BOX -->
+<div style="background:#f0fdf4;border-left:4px solid #00b894;padding:14px 18px;margin-bottom:18px;border-radius:3px;">
+<div style="font-weight:700;color:#065f46;margin-bottom:6px;font-size:14px;">Executive Summary</div>
+<ul style="margin:0;padding-left:20px;font-size:13px;line-height:1.6;">
+  <li><b>Cumulative P&amp;L: −$11.77</b> across 732 settled trades (51.0% WR). Realized bleed rate has decelerated from −$1.12/day (late March) to ~−$0.50/day over the last 7 settlement-days.</li>
+  <li><b>Post-Sprint-11 cohort: 290/500</b> trades toward the ML retrain gate (58% complete). At current tempo (~2.5 trades/day) ETA is mid-July 2026. <b>210 trades remain.</b></li>
+  <li><b>Data integrity: 3-layer defense LIVE.</b> Zero orphans, zero Layer-2 guard firings, zero Layer-3 CHECK violations since Apr 20 deploy.</li>
+  <li><b>Sprint 14 closed.</b> Data integrity hardening (14/14b), Kelly sizing + backtest harness (14c), Bayesian shrinkage + Two-Gate Stack epistemology (14d). Four sequential commits.</li>
+  <li><b>Operating discipline:</b> Do NOT touch thresholds, execution logic, or flip <code>KELLY_SIZING_ENABLED</code> until ML retrain passes Brier &lt; 0.05 AND Jaccard ≥ 0.70 at N=500.</li>
+</ul>
+</div>
+
+<!-- HEADLINE NUMBERS -->
+<h2 style="font-size:17px;color:#0f766e;margin:22px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Live Performance Snapshot</h2>
+
+<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
+  <tr>
+    <td style="padding:10px 12px;background:#f7fafc;border:1px solid #e2e8f0;width:25%;vertical-align:top;">
+      <div style="color:#718096;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Cumulative P&amp;L</div>
+      <div style="font-size:22px;font-weight:700;color:#c53030;font-variant-numeric:tabular-nums;">−$11.77</div>
+      <div style="color:#718096;font-size:11px;">732 settled · 51.0% WR</div>
+    </td>
+    <td style="padding:10px 12px;background:#f7fafc;border:1px solid #e2e8f0;width:25%;vertical-align:top;">
+      <div style="color:#718096;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Post-Sprint-11</div>
+      <div style="font-size:22px;font-weight:700;color:#d97706;font-variant-numeric:tabular-nums;">290 / 500</div>
+      <div style="color:#718096;font-size:11px;">56.2% WR · −$2.04</div>
+    </td>
+    <td style="padding:10px 12px;background:#f7fafc;border:1px solid #e2e8f0;width:25%;vertical-align:top;">
+      <div style="color:#718096;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Open Positions</div>
+      <div style="font-size:22px;font-weight:700;color:#0f766e;font-variant-numeric:tabular-nums;">4</div>
+      <div style="color:#718096;font-size:11px;">2 long-dated events</div>
+    </td>
+    <td style="padding:10px 12px;background:#f7fafc;border:1px solid #e2e8f0;width:25%;vertical-align:top;">
+      <div style="color:#718096;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;">Data Integrity</div>
+      <div style="font-size:22px;font-weight:700;color:#059669;font-variant-numeric:tabular-nums;">0 / 0 / 0</div>
+      <div style="color:#718096;font-size:11px;">orphans · L2 · L3</div>
+    </td>
+  </tr>
+</table>
+
+<!-- CUMULATIVE P&L CURVE -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">30-Day Equity Curve</h2>
+<div style="color:#4a5568;font-size:12px;margin-bottom:8px;">Cumulative P&amp;L from 2026-03-24 (−$2.52) to 2026-04-22 (−$11.77). Bars scaled to $12 max drawdown depth.</div>
+
+<table style="width:100%;border-collapse:collapse;font-size:11px;font-family:'SF Mono','Monaco',monospace;">
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-24</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−252¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:20.5%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$2.52</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-25</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−84¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:27.3%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$3.36</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-26</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−84¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:34.2%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$4.20</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-27</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−22¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:36.0%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$4.42</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-28</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−66¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:41.3%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$5.08</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-29</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−228¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:59.9%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$7.36</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-30</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+434¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:24.6%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$3.02</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-03-31</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−295¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:48.6%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$5.97</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-01</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−131¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:59.2%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$7.28</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-02</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−283¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:82.3%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$10.11</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-03</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+166¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:68.8%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$8.45</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-04</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+48¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:64.8%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$7.97</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-05</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+24¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:62.9%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$7.73</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-06</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−177¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:77.3%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$9.50</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-07</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+210¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:60.2%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$7.40</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-08</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−296¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:84.3%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$10.36</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-09</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+211¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:67.1%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$8.25</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-10</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−11¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:68.0%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$8.36</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-11</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−286¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:91.3%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.22</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-12</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−1¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:91.4%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.23</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-13</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+58¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:86.7%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$10.65</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-14</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−64¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:91.9%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.29</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-15</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−28¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:94.1%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.57</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-16</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−72¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:100.0%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$12.29</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-18</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+32¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:97.4%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.97</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-19</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−23¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:99.3%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$12.20</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-20</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+59¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:94.5%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.61</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-21</td><td style="padding:3px 8px;width:60px;text-align:right;color:#059669;font-variant-numeric:tabular-nums;">+41¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:91.1%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.20</td></tr>
+  <tr><td style="padding:3px 8px;width:90px;color:#4a5568;font-size:11px;">2026-04-22</td><td style="padding:3px 8px;width:60px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;">−57¢</td><td style="padding:3px 8px;"><div style="background:#e2e8f0;height:10px;width:100%;position:relative;"><div style="background:#c53030;width:95.8%;height:10px;"></div></div></td><td style="padding:3px 8px;width:80px;text-align:right;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$11.77</td></tr>
+</table>
+
+<!-- BLEED-RATE TREND -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Bleed-Rate Trajectory (7-day rolling)</h2>
+<div style="color:#4a5568;font-size:12px;margin-bottom:8px;">Settlement-date based. The recent zero is a settlement drought — 4 long-dated positions (Apr 13 event dates) still pending.</div>
+
+<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;">
+  <tr>
+    <td style="width:110px;padding:4px 8px;color:#4a5568;">28 → 21d ago</td>
+    <td style="padding:4px 8px;">
+      <div style="background:#fecaca;width:70%;height:22px;display:inline-block;"></div>
+    </td>
+    <td style="padding:4px 8px;text-align:right;width:130px;color:#c53030;font-variant-numeric:tabular-nums;font-weight:600;">−$6.72 (−96¢/day)</td>
+  </tr>
+  <tr>
+    <td style="width:110px;padding:4px 8px;color:#4a5568;">21 → 14d ago</td>
+    <td style="padding:4px 8px;">
+      <div style="background:#86efac;width:5%;height:22px;display:inline-block;"></div>
+    </td>
+    <td style="padding:4px 8px;text-align:right;width:130px;color:#059669;font-variant-numeric:tabular-nums;font-weight:600;">+$0.53 (+8¢/day)</td>
+  </tr>
+  <tr>
+    <td style="width:110px;padding:4px 8px;color:#4a5568;">14 → 7d ago</td>
+    <td style="padding:4px 8px;">
+      <div style="background:#fed7aa;width:36%;height:22px;display:inline-block;"></div>
+    </td>
+    <td style="padding:4px 8px;text-align:right;width:130px;color:#d97706;font-variant-numeric:tabular-nums;font-weight:600;">−$3.47 (−50¢/day)</td>
+  </tr>
+  <tr>
+    <td style="width:110px;padding:4px 8px;color:#4a5568;">7 → 0d ago</td>
+    <td style="padding:4px 8px;">
+      <div style="background:#e2e8f0;width:0%;height:22px;display:inline-block;"></div>
+    </td>
+    <td style="padding:4px 8px;text-align:right;width:130px;color:#718096;font-variant-numeric:tabular-nums;font-weight:600;">$0 (0 settled)</td>
+  </tr>
+</table>
+<div style="color:#4a5568;font-size:12px;font-style:italic;">Week-over-week: March's heavy bleed (Sprint 11 tuning era, −$1/day) has not returned. The convexity penalty + YES-side flow penalty + OOM fixes are holding.</div>
+
+<!-- POST-SPRINT-11 GATE PROGRESS -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Path to ML Retrain Gate (N=500)</h2>
+<div style="background:#f7fafc;padding:10px 14px;border:1px solid #e2e8f0;border-radius:4px;margin-bottom:10px;">
+  <div style="background:#e2e8f0;height:32px;border-radius:3px;overflow:hidden;position:relative;">
+    <div style="background:linear-gradient(90deg,#0f766e,#059669);width:58%;height:32px;"></div>
+    <div style="position:absolute;top:8px;left:10px;color:#ffffff;font-weight:700;font-size:13px;">290 settled (58.0%)</div>
+    <div style="position:absolute;top:8px;right:10px;color:#1a202c;font-weight:600;font-size:13px;">500 target</div>
+  </div>
+  <div style="margin-top:8px;color:#4a5568;font-size:12px;">
+    <b>210 trades remaining.</b> At ~2.5 trades/day, gate unlocks <b>~mid-July 2026</b>.
+    Do NOT rush the retrain — Sprint 11 (Apr 2) + Sprint 13a (Apr 9) changed the data-generating distribution;
+    training on N&lt;500 would overfit to a regime mix.
+  </div>
+</div>
+
+<!-- BUCKET PERFORMANCE -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Live Performance by Price Bucket (post-Sprint-11)</h2>
+<div style="color:#4a5568;font-size:12px;margin-bottom:8px;">Critical: live flat-tiered sizing (1 contract per ALERT) produces a <b>different distribution than the Phase C Kelly backtest</b>. The 15-24¢ "steamroller bucket" in backtest is actually break-even positive in live execution because flat sizing limits exposure to single contracts.</div>
+
+<table style="width:100%;border-collapse:collapse;font-size:12px;">
+<tr style="background:#e2e8f0;">
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Bucket</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">N</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">WR</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">P&amp;L</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Bar (abs)</th>
+</tr>
+<tr>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">0–14¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">24</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">4.2%</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;color:#c53030;font-weight:600;">−$2.44</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;"><div style="background:#fecaca;width:66%;height:14px;display:inline-block;"></div></td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">15–24¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">42</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">21.4%</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;color:#059669;font-weight:600;">+$0.70</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;"><div style="background:#86efac;width:19%;height:14px;display:inline-block;"></div></td>
+</tr>
+<tr>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">25–49¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">25</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">44.0%</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;color:#059669;font-weight:600;">+$1.53</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;"><div style="background:#86efac;width:41%;height:14px;display:inline-block;"></div></td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">50–74¢ <b style="color:#c53030;">(biggest loss)</b></td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">87</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">55.2%</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;color:#c53030;font-weight:600;">−$3.70</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;"><div style="background:#fecaca;width:100%;height:14px;display:inline-block;"></div></td>
+</tr>
+<tr>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">75–89¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">60</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">78.3%</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;color:#059669;font-weight:600;">+$1.86</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;"><div style="background:#86efac;width:50%;height:14px;display:inline-block;"></div></td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">90–99¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">52</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;">90.4%</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;color:#4a5568;font-weight:600;">+$0.01</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;"><div style="background:#cbd5e0;width:1%;height:14px;display:inline-block;"></div></td>
+</tr>
+</table>
+
+<!-- OPEN POSITIONS -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Open Positions (4)</h2>
+<table style="width:100%;border-collapse:collapse;font-size:12px;">
+<tr style="background:#e2e8f0;">
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Ticker</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Side</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">Entry</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">Score</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Opened</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Note</th>
+</tr>
+<tr>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;font-family:monospace;">KXNBAROY-26-CFLA</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">no</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">41¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">0.59</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">Apr 13</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;color:#4a5568;">long-dated (NBA ROY)</td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;font-family:monospace;">KXPERUPRES-26-KFUJ</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">no</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">76¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">0.57</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">Apr 13</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;color:#4a5568;">long-dated (Peru pres election)</td>
+</tr>
+<tr>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;font-family:monospace;">KXTRUMPOUT27-27-26AUG01</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">no</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">93¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">0.57</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">Apr 20</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;color:#d97706;"><b>Deliberately not intervened</b> — preserves ML right-tail</td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;font-family:monospace;">KXLLM1-26APR25-OPEN</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">yes</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">20¢</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;text-align:right;">0.61</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;">Apr 20</td>
+  <td style="padding:5px 10px;border:1px solid #e2e8f0;color:#4a5568;">LLM benchmark prediction</td>
+</tr>
+</table>
+
+<!-- SPRINT 14 SUMMARY -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Sprint 14 Completion Summary</h2>
+<table style="width:100%;border-collapse:collapse;font-size:12px;">
+<tr style="background:#e2e8f0;">
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Phase</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Delivery</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Status</th>
+</tr>
+<tr>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;"><b>14</b> (Apr 16)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;">Data-integrity code+app guards (Layer 1 fill-price fix + Layer 2 rejection guard); 9 orphan rows recovered (6W/3L, −23¢)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;color:#059669;font-weight:600;">LIVE</td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;"><b>14b</b> (Apr 20)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;">Layer 3 CHECK constraint migration; 805 rows rebuilt &lt;0.1s; smoke test verified</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;color:#059669;font-weight:600;">LIVE</td>
+</tr>
+<tr>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;"><b>14c</b> (Apr 20)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>src/diamond_kelly.py</code> Half-Kelly utility + <code>backtest_kelly.py</code> 3-phase harness (Oracle/Sigma/PiT)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;color:#d97706;font-weight:600;">DORMANT</td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;"><b>14c-addendum</b> (Apr 21)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;">Phase ABC executed. 4 bugs fixed during run (invariant, bankroll, MaxDD, warmup N-matching). Phase C naive: <b>−$477 / 55% DD</b> on bucket edge</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;color:#059669;font-weight:600;">VALIDATED</td>
+</tr>
+<tr>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;"><b>14d</b> (Apr 21)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;">Bayesian shrinkage (k=20+3√N, derived analytically from safety-cap constraint). Shrunk Phase C: <b>−$221 / 34% DD</b> (42% / 38% compression). <code>min_active_n</code> retired. ML gate tightened to Brier &lt; 0.05.</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;color:#d97706;font-weight:600;">DORMANT</td>
+</tr>
+</table>
+
+<!-- KELLY PHASE C COMPARISON -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Phase C Backtest — The Key Finding</h2>
+<div style="color:#4a5568;font-size:12px;margin-bottom:8px;">The three-column comparison that defined Sprint 14d: Bayesian shrinkage compressed the Kelly-on-bucket-edge disaster but didn't cure it. <b>Residual loss is information-theoretic, not sizing-theoretic.</b></div>
+
+<table style="width:100%;border-collapse:collapse;font-size:12px;">
+<tr style="background:#e2e8f0;">
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:left;">Variant</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">N</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">Kelly P&amp;L</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">MaxDD %</th>
+  <th style="padding:6px 10px;border:1px solid #cbd5e0;text-align:right;">Boot p95 P&amp;L</th>
+</tr>
+<tr>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;">Naive bucket (legacy tombstone)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;">227</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#c53030;font-weight:600;">−$477.50</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#c53030;font-weight:600;">55.22%</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#c53030;">−$188</td>
+</tr>
+<tr style="background:#f7fafc;">
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;">Shrunk (matched)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;">227</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#d97706;font-weight:600;">−$277.58</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#d97706;font-weight:600;">34.11%</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#d97706;">−$8</td>
+</tr>
+<tr>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;">Shrunk (no warmup, full)</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;">289</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#d97706;font-weight:600;">−$221.25</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#d97706;font-weight:600;">34.09%</td>
+  <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#059669;"><b>+$79</b></td>
+</tr>
+</table>
+<div style="color:#4a5568;font-size:12px;margin-top:10px;font-style:italic;padding:10px 14px;background:#fffbeb;border-left:3px solid #d97706;">
+<b>The Fundamental Theorem of Alpha (stated empirically):</b> "Shrinkage is a variance-reducer, not an information-creator." Kelly sizing is an amplifier. Shrinkage is a dampener. An ML model with real IC is the engine. If the engine produces zero horsepower, the car does not move, regardless of how good the brakes are.
+</div>
+
+<!-- THE TWO-GATE STACK -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Kelly Activation Policy — The Two-Gate Stack</h2>
+<table style="width:100%;border-collapse:collapse;font-size:13px;">
+<tr>
+  <td style="width:50%;padding:12px;background:#eff6ff;border:1px solid #93c5fd;vertical-align:top;">
+    <div style="font-weight:700;color:#1e40af;margin-bottom:6px;">Gate A — Information</div>
+    <div style="font-size:12px;color:#1e3a8a;">ML model produces calibrated edge with:
+    <ul style="margin:6px 0;padding-left:16px;">
+      <li>Brier &lt; <b>0.05</b> (tightened from 0.25)</li>
+      <li>Jaccard ≥ 0.70 across CV folds</li>
+    </ul>
+    Sources alpha from the data.</div>
+  </td>
+  <td style="width:50%;padding:12px;background:#f0fdf4;border:1px solid #86efac;vertical-align:top;">
+    <div style="font-weight:700;color:#065f46;margin-bottom:6px;">Gate B — Variance Control</div>
+    <div style="font-size:12px;color:#064e3b;">Bayesian shrinkage wraps ML edge before Kelly sees it:
+    <ul style="margin:6px 0;padding-left:16px;">
+      <li>k = 20 + 3√N pseudocount</li>
+      <li>k_base=20 derived from steamroller algebra</li>
+    </ul>
+    Protects tails of estimator confidence.</div>
+  </td>
+</tr>
+</table>
+<div style="color:#4a5568;font-size:12px;margin-top:8px;">
+<b>Both gates required.</b> Information without variance control reproduces Phase C naive (−$477 / 55% DD). Variance control without information reproduces Phase C shrunk (−$221 / 34% DD — still negative EV on zero-IC signal).
+</div>
+
+<!-- NEXT -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Posture &amp; Next Actions</h2>
+<div style="background:#fef2f2;padding:12px 16px;border:1px solid #fecaca;border-radius:3px;font-size:13px;">
+<div style="font-weight:700;color:#991b1b;margin-bottom:6px;">Patience window active. Do NOT:</div>
+<ul style="margin:4px 0 10px 0;padding-left:20px;color:#7f1d1d;">
+  <li>Touch execution thresholds (composite score has near-zero post-price IC per Sprint 13b)</li>
+  <li>Flip <code>KELLY_SIZING_ENABLED</code> before both Gate A and Gate B validate</li>
+  <li>Intervene on the 93¢ Trump trade (training-distribution right tail must survive to ML retrain)</li>
+  <li>Enable CTM before N &gt; 1,500 settled trades (bias-variance trap)</li>
+</ul>
+<div style="font-weight:700;color:#991b1b;margin-bottom:6px;">Passive monitoring only:</div>
+<ul style="margin:4px 0 0 0;padding-left:20px;color:#7f1d1d;">
+  <li>Guard firings (L2 / L3 / orphans) should stay at 0/0/0 — currently holding 16+ days</li>
+  <li>Sprint 13c feature telemetry: flow_accel ~24% activation, event_rel_flow ~67%, stale flag 6% (kill at 20%)</li>
+  <li>Alert if bleed resumes above −$1/day sustained for 5+ days</li>
+</ul>
+</div>
+
+<!-- ARTIFACTS -->
+<h2 style="font-size:17px;color:#0f766e;margin:24px 0 10px 0;border-left:3px solid #0f766e;padding-left:10px;">Artifacts</h2>
+<ul style="font-size:12px;color:#4a5568;margin:0;padding-left:20px;">
+  <li>Full milestone report: <code>reports/2026_04_21_kelly_phase_abc.html</code> (3-column comparison, decision log, kill criteria)</li>
+  <li>Sprint 14 email draft: <code>sprint14_email_draft.html</code></li>
+  <li>Commits since Apr 13: <code>945635a</code> (Sprint 14d), <code>0e5a6d0</code> (Sprint 14/14b/14c), <code>8339e71</code> (Sprint 13c)</li>
+  <li>Dashboard: <a href="http://129.158.40.51:8080" style="color:#0f766e;">http://129.158.40.51:8080</a></li>
+  <li>GitHub: <a href="https://github.com/pjnks/kalshi-diamond" style="color:#0f766e;">pjnks/kalshi-diamond</a> (private)</li>
+</ul>
+
+<div style="margin-top:30px;padding-top:16px;border-top:1px solid #e2e8f0;color:#718096;font-size:11px;">
+Generated 2026-04-23 · DIAMOND is on track. Sprint 14 closed. The tracks, suspension, and brakes are built. The engine (ML model) awaits N=500.
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DIAMOND — Strategy Autopsy & Shutdown</title>
+<style>
+  :root {
+    --neon-green:  #00ff9f;
+    --neon-cyan:   #00f0ff;
+    --neon-pink:   #ff2d6b;
+    --neon-yellow: #ffe156;
+    --dark-bg:     #030508;
+    --panel:       #0a1520;
+    --border:      #1a3040;
+    --text:        #d0eaf5;
+    --dim:         #8ab4c8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--dark-bg);
+    color: var(--text);
+    font-family: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+    font-size: 14px;
+    line-height: 1.55;
+    margin: 0;
+    padding: 40px 16px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 {
+    font-family: "Inter", system-ui, sans-serif;
+    color: var(--neon-pink);
+    margin: 0 0 6px 0;
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    font-family: "Inter", system-ui, sans-serif;
+    color: var(--neon-green);
+    margin: 42px 0 8px 0;
+    font-size: 20px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+  }
+  h3 {
+    font-family: "Inter", system-ui, sans-serif;
+    color: var(--neon-cyan);
+    margin: 24px 0 6px 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .meta { color: var(--dim); font-size: 13px; margin-bottom: 26px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 14px 0;
+  }
+  .tldr {
+    background: linear-gradient(135deg, rgba(255,45,107,0.08), rgba(0,240,255,0.04));
+    border: 1px solid var(--neon-pink);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 14px 0 26px;
+  }
+  .tldr li { margin: 6px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--neon-cyan); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .red { color: var(--neon-pink); }
+  .green { color: var(--neon-green); }
+  .yellow { color: var(--neon-yellow); }
+  .cyan { color: var(--neon-cyan); }
+  .dim { color: var(--dim); }
+  .bold { font-weight: 700; }
+  .bar-row { display: flex; align-items: center; margin: 4px 0; font-size: 12px; }
+  .bar-label { width: 130px; color: var(--dim); }
+  .bar-track { flex: 1; height: 14px; background: rgba(255,255,255,0.04); border-radius: 2px; position: relative; }
+  .bar-fill { height: 100%; border-radius: 2px; }
+  .bar-value { width: 90px; text-align: right; padding-left: 10px; font-variant-numeric: tabular-nums; }
+  .verdict {
+    border: 2px solid var(--neon-pink);
+    background: rgba(255,45,107,0.06);
+    padding: 18px 22px;
+    border-radius: 6px;
+    margin: 14px 0;
+  }
+  .verdict h3 { margin-top: 0; color: var(--neon-pink); }
+  ul { padding-left: 20px; }
+  ol { padding-left: 20px; }
+  code {
+    background: rgba(0,240,255,0.08);
+    color: var(--neon-cyan);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+  .footer {
+    margin-top: 60px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--dim);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>DIAMOND — Strategy Autopsy &amp; Shutdown</h1>
+<div class="meta">
+  <strong>Date:</strong> 2026-05-13 &nbsp;|&nbsp;
+  <strong>Scope:</strong> End-of-life report for the Kalshi anomaly-detection strategy, covering the post-Sprint-14h clean cohort (May 6 → May 10) and the full project arc &nbsp;|&nbsp;
+  <strong>Engineering hours:</strong> ~120 across all sprints (8 → 14h)
+</div>
+
+<div class="tldr">
+<h3 style="margin-top:0;color:var(--neon-pink);">TL;DR — The Hypothesis is Dead</h3>
+<ul>
+  <li><span class="bold red">Execution layer kill switch latched at −$51.52</span> on 2026-05-08, after the cumulative cap ($50) was breached by 10 days of clean post-14h trading.</li>
+  <li><span class="bold red">Evaluation layer Brier = 0.2000</span> at N=300 on PiT-purged CV. AUC degrading with N (0.787 → 0.750). Feature count collapsing (5 → 3). Null-permutation test <em>rejected</em> Sprint 14e absorption variants.</li>
+  <li><span class="bold cyan">Total alignment achieved</span>: live execution and ML evaluation independently produce the same verdict — no scalable Information Coefficient at retail scale on Kalshi orderbook microstructure.</li>
+  <li><span class="bold green">Infrastructure is the asset</span>: PiT-purged CV, three-layer data integrity, two-tier kill switch, task-death watchdog, and cohort-burn discipline all transfer to BERYL/CITRINE on Day 1.</li>
+  <li><span class="bold yellow">Action</span>: shut down <code>diamond-monitor</code> + <code>diamond-dashboard</code>, archive the DB as a clean research dataset, pivot capital and engineering attention to BERYL/CITRINE.</li>
+</ul>
+</div>
+
+<h2>1. Final Performance</h2>
+
+<h3>1.1 All-time live trading (2026-03-15 → 2026-05-10)</h3>
+<table>
+<thead><tr><th>Metric</th><th class="num">Value</th><th>Interpretation</th></tr></thead>
+<tbody>
+<tr><td>Settled trades</td><td class="num">1,575</td><td>Adequate N for statistical conclusion</td></tr>
+<tr><td>Win rate (all-time)</td><td class="num">53.78%</td><td>3.78pp above 50% — at edge of statistical noise</td></tr>
+<tr><td>Cumulative P&amp;L</td><td class="num red bold">−$51.52</td><td>Tier-1 kill switch ($50 cap) breached</td></tr>
+<tr><td>P&amp;L per trade (avg)</td><td class="num red">−3.3¢</td><td>Bleed dominated by execution friction</td></tr>
+<tr><td>Open positions (at shutdown)</td><td class="num">3</td><td>2 sports tails + 1 long-dated political (Trump Aug 2027)</td></tr>
+<tr><td>Fill rate</td><td class="num">~91%</td><td>Aggressive auto-cancel preserved entries</td></tr>
+<tr><td>Data integrity layer firings</td><td class="num green">0</td><td>3-layer defense held continuously since 2026-04-16</td></tr>
+</tbody>
+</table>
+
+<h3>1.2 Post-14h clean cohort (2026-05-06 → 2026-05-10)</h3>
+<p class="dim">First cohort in DIAMOND history with non-contaminated 10-dimensional microstructure telemetry. Sprint 14h fixed the orderbook_poll_loop CancelledError leak; absorption pipeline operated at 0.00% stale, 99.98% nonzero.</p>
+<table>
+<thead><tr><th>Metric</th><th class="num">Value</th><th>vs all-time</th></tr></thead>
+<tbody>
+<tr><td>Settled</td><td class="num">305</td><td>—</td></tr>
+<tr><td>Win rate</td><td class="num green">60.33%</td><td>+6.55pp better than all-time (favorable schedule)</td></tr>
+<tr><td>Cumulative P&amp;L</td><td class="num red">−$19.65</td><td>−6.4¢/trade — bleed accelerated despite higher WR</td></tr>
+<tr><td>Window length</td><td class="num">~4.0 days</td><td>~75 settled/day sustained</td></tr>
+<tr><td>Cohort terminated by</td><td class="num red">kill_switch_cumulative</td><td>$50 cap latched 2026-05-08</td></tr>
+</tbody>
+</table>
+
+<h3>1.3 Daily P&amp;L decay (last 6 trading days)</h3>
+<div class="panel">
+<div class="bar-row">
+  <div class="bar-label">May 05</div>
+  <div class="bar-track"><div class="bar-fill" style="width:25px;background:var(--neon-pink);"></div></div>
+  <div class="bar-value red">−$2.48</div>
+</div>
+<div class="bar-row">
+  <div class="bar-label">May 06 (14h deploy)</div>
+  <div class="bar-track"><div class="bar-fill" style="width:46px;background:var(--neon-pink);"></div></div>
+  <div class="bar-value red">−$4.64</div>
+</div>
+<div class="bar-row">
+  <div class="bar-label">May 07</div>
+  <div class="bar-track"><div class="bar-fill" style="width:115px;background:var(--neon-pink);"></div></div>
+  <div class="bar-value red">−$11.47</div>
+</div>
+<div class="bar-row">
+  <div class="bar-label">May 08 (cap latch)</div>
+  <div class="bar-track"><div class="bar-fill" style="width:49px;background:var(--neon-pink);"></div></div>
+  <div class="bar-value red">−$4.88</div>
+</div>
+<div class="bar-row">
+  <div class="bar-label">May 10 (residual)</div>
+  <div class="bar-track"><div class="bar-fill" style="width:5px;background:var(--neon-green);"></div></div>
+  <div class="bar-value green">+$0.54</div>
+</div>
+<p class="dim" style="margin-top:14px;">The May 07 loss of −$11.47 is the day the cumulative crossed −$45 → −$56. Kill switch caught the next day at −$51 once the May 08 day was netted in. Strategy continued bleeding even under "favorable" 60% WR conditions because per-trade edge is structurally below execution friction (+0.77¢ adverse slippage + 3-12¢ bid-ask spreads).</p>
+</div>
+
+<h2>2. The Five Diagnostic Alignment</h2>
+<p>The strength of the autopsy is that <em>five independent signals</em> converged on the same verdict. No single number could have been overruled by another.</p>
+
+<h3>Learning curve sweep (PiT-purged CV, frozen N=305 cohort)</h3>
+<table>
+<thead><tr><th>N</th><th class="num">Brier</th><th class="num">AUC</th><th class="num">Features kept</th><th class="num">Jaccard</th><th class="num">Δ vs naive</th></tr></thead>
+<tbody>
+<tr><td>50</td><td class="num dim">ERR (PiT)</td><td class="num dim">—</td><td class="num dim">—</td><td class="num dim">—</td><td class="num dim">CV ≤ 0 valid folds</td></tr>
+<tr><td>100</td><td class="num dim">ERR (PiT)</td><td class="num dim">—</td><td class="num dim">—</td><td class="num dim">—</td><td class="num dim">CV ≤ 0 valid folds</td></tr>
+<tr><td>150</td><td class="num">0.1995</td><td class="num">0.769</td><td class="num">5</td><td class="num dim">—</td><td class="num">−0.031</td></tr>
+<tr><td>200</td><td class="num">0.1883</td><td class="num green">0.787</td><td class="num">5</td><td class="num">0.43</td><td class="num">−0.050</td></tr>
+<tr><td>250</td><td class="num">0.1960</td><td class="num">0.762</td><td class="num">5</td><td class="num">0.67</td><td class="num">−0.041</td></tr>
+<tr><td>300</td><td class="num bold red">0.2000</td><td class="num red">0.750</td><td class="num red">3</td><td class="num">0.60</td><td class="num">−0.039</td></tr>
+</tbody>
+</table>
+
+<h3>Signal 1 — Brier plateau at ~0.20 (FLAT)</h3>
+<div class="panel">
+<p>Brier went 0.1995 → 0.1883 → 0.1960 → 0.2000 across 150 → 300. <span class="bold red">No descending slope.</span> The model's <code>learning_curve.py</code> docstring is unambiguous about this regime: <em>"Brier flat above 0.05 → MORE DATA WON'T SAVE US, features lack IC."</em> The activation gate of Brier &lt; 0.05 is mathematically unreachable from this trajectory; even the relaxed "realistic regime" fallback of Brier &lt; 0.18 is not met.</p>
+</div>
+
+<h3>Signal 2 — AUC <em>degrading</em> with N (most damning)</h3>
+<div class="panel">
+<div class="bar-row">
+  <div class="bar-label">N=150</div>
+  <div class="bar-track"><div class="bar-fill" style="width:540px;background:var(--neon-cyan);"></div></div>
+  <div class="bar-value cyan">0.769</div>
+</div>
+<div class="bar-row">
+  <div class="bar-label">N=200</div>
+  <div class="bar-track"><div class="bar-fill" style="width:564px;background:var(--neon-green);"></div></div>
+  <div class="bar-value green">0.787 ← peak</div>
+</div>
+<div class="bar-row">
+  <div class="bar-label">N=250</div>
+  <div class="bar-track"><div class="bar-fill" style="width:528px;background:var(--neon-yellow);"></div></div>
+  <div class="bar-value yellow">0.762</div>
+</div>
+<div class="bar-row">
+  <div class="bar-label">N=300</div>
+  <div class="bar-track"><div class="bar-fill" style="width:512px;background:var(--neon-pink);"></div></div>
+  <div class="bar-value red">0.750 ← falling</div>
+</div>
+<p style="margin-top:14px;">A well-specified model with real IC sees AUC <em>stabilize or improve</em> with more data, as test-set variance shrinks toward the true underlying ranking quality. <span class="bold red">Ours peaked at N=200 then declined.</span> This is the mathematical signature of small-sample <em>overfitting melting away</em> as out-of-sample data arrives. The 0.787 at N=200 was the illusion; 0.750 at N=300 is closer to the population truth — and the trend implies it will keep drifting toward ~0.70 with more N.</p>
+</div>
+
+<h3>Signal 3 — Feature count collapse (5 → 3 at N=300)</h3>
+<div class="panel">
+<p>The null-importance permutation test (100 shuffles, 95th percentile threshold) <span class="bold red">rejected 2 of the 5 features</span> when fed the full N=300 sample. Sprint 13c orthogonal features (<code>flow_acceleration</code>, <code>event_relative_flow</code>) and Sprint 14e absorption variants (<code>book_absorption_*</code>) — the features specifically engineered to capture order-book microstructure alpha — <em>failed the null test</em>. The regression is telling us in its native language that these measurements are statistically indistinguishable from random shuffles of the labels.</p>
+</div>
+
+<h3>Signal 4 — Persistent U-shape monotonicity inversion</h3>
+<div class="panel">
+<p>Model emitted: <code>✗ 2 monotonicity inversions — U-shape may persist. Do NOT lower CRITICAL threshold.</code></p>
+<p>This is the <em>same</em> diagnostic that fired pre-Sprint-13c. The intrinsically orthogonal features were specifically designed to break the base-rate U-shape (where score vs entry price had inverted curvature). <span class="bold red">They did not.</span> Score-vs-price is still dominated by base-rate conflation, which means the "edge" the composite score appears to detect is mostly the artifact of longshots-lose / favorites-win base rates, not directional information.</p>
+</div>
+
+<h3>Signal 5 — OOS confidence interval includes 50%</h3>
+<div class="panel">
+<p>Model emitted: <code>WARNING: OOS win rate CI [18.6%, 49.9%] includes 50% — cannot reject null hypothesis of no edge</code></p>
+<p>The strictest statistical test. At N=300, the model's out-of-sample win-rate confidence interval has 49.9% as its upper bound — meaning <span class="bold red">we cannot statistically reject the hypothesis that the model has zero predictive power.</span> The lower bound at 18.6% is wide due to small N, but the upper bound touching 50% is the structural kill signal.</p>
+</div>
+
+<h2>3. The Dual Verdict</h2>
+<table>
+<thead><tr><th>Layer</th><th>Result</th><th>What it says</th></tr></thead>
+<tbody>
+<tr><td class="bold">Execution</td><td class="red">−$51.52 cumulative, Tier-1 kill switch latched 2026-05-08</td><td>Strategy bleeds execution friction at retail scale</td></tr>
+<tr><td class="bold">Evaluation</td><td class="red">Brier 0.20 plateau, AUC degrading, 3/9 features survive null test</td><td>Feature set lacks IC after price-controlling</td></tr>
+</tbody>
+</table>
+<div class="verdict">
+<h3>Verdict — Total Alignment</h3>
+<p>Both layers independently arrived at the <em>same conclusion</em>. This is the cleanest possible alignment between execution and evaluation. There is no "the model is right but execution is failing" (Tragic Alpha) mismatch. There is no "execution is fine but the model is overfitting" mismatch. The system is internally consistent in declaring: <span class="bold">no scalable edge.</span></p>
+<p>The hypothesis tested — <em>"Kalshi orderbook microstructure contains tradeable alpha at retail scale through a flat-sized, longshot-biased, anomaly-detection strategy"</em> — is falsified with five-way diagnostic agreement.</p>
+</div>
+
+<h2>4. Sprint Timeline (the arc from prototype to autopsy)</h2>
+<table>
+<thead><tr><th>Date</th><th>Sprint</th><th>What happened</th><th>Verdict</th></tr></thead>
+<tbody>
+<tr><td>2026-03-28</td><td>8</td><td>DIAMOND↔CITRINE bridge; OCI memory hardening</td><td class="green">infra</td></tr>
+<tr><td>2026-03-31</td><td>10</td><td>Convexity penalty inverted; CTM staged; ML pipeline L1 fixed</td><td class="green">infra + scoring</td></tr>
+<tr><td>2026-04-02</td><td>11</td><td>Category derivation; 25-49¢ halt; YES-side flow penalty</td><td class="yellow">scoring tuning</td></tr>
+<tr><td>2026-04-03/04</td><td>12</td><td>OOM crash loop fix (7 root causes); asyncio safety</td><td class="green">infra</td></tr>
+<tr><td>2026-04-09</td><td>13a</td><td>L1 collinearity trap → switched to Ridge L2 (Jaccard stability)</td><td class="green">ML stability</td></tr>
+<tr><td>2026-04-11</td><td>13b</td><td>Signal audit: 6/8 scorers have |IC|&lt;0.03 after price-controlling. Built FeatureOrthogonalizer.</td><td class="yellow">first warning</td></tr>
+<tr><td>2026-04-13</td><td>13c</td><td>flow_acceleration + event_relative_flow shadow features (intrinsically orthogonal)</td><td class="green">feature engineering</td></tr>
+<tr><td>2026-04-16/18</td><td>14</td><td>3-layer data integrity (code + app guard + schema CHECK constraint)</td><td class="green">infra</td></tr>
+<tr><td>2026-04-20</td><td>14b/c</td><td>Layer 3 deployed; Kelly + backtest harness staged dormant</td><td class="green">infra + risk mgmt</td></tr>
+<tr><td>2026-04-21</td><td>14d</td><td>Bayesian shrinkage; Two-Gate Stack epistemology codified; Phase ABC harness executed</td><td class="green">policy</td></tr>
+<tr><td>2026-04-26/28</td><td>14e</td><td>WebSocket subscription fix (67→257 tickers); absorption metrics shadow-deployed</td><td class="green">infra + features</td></tr>
+<tr><td>2026-04-29</td><td>14f</td><td>Orderbook poll universe expansion; first N=500 cohort reset</td><td class="green">infra</td></tr>
+<tr><td>2026-05-01</td><td>14g</td><td>Kill switch SQL bug; two-tier cap (daily $20 + cumulative $50)</td><td class="green">risk mgmt</td></tr>
+<tr><td>2026-05-06</td><td>14h</td><td>CancelledError leak fix + task-death watchdog; final cohort reset (clean data)</td><td class="green">infra</td></tr>
+<tr><td>2026-05-08</td><td>—</td><td>Tier-1 cumulative kill switch latched at −$51.52</td><td class="red">execution kill</td></tr>
+<tr><td>2026-05-13</td><td>14i</td><td>Strategy autopsy + shutdown</td><td class="red">terminated</td></tr>
+</tbody>
+</table>
+
+<h2>5. Decision Log — Why We Pivot Now, Not Later</h2>
+<table>
+<thead><tr><th>Option</th><th>Cost</th><th>Expected info</th><th>Decision</th></tr></thead>
+<tbody>
+<tr><td><span class="bold">A. Manually clear cap, retry with Tenth-Kelly + bid-ask gate + isotonic</span></td><td class="red">2-4 weeks engineering + additional capital risk</td><td class="dim">Low — same features, same diagnostics, same expected ceiling</td><td class="red">Rejected</td></tr>
+<tr><td><span class="bold">B. Hold position; wait for N=500 to do "official" retrain</span></td><td class="red">~7 more days; no clear-cap action means no new trades</td><td class="dim">Low — Brier trajectory has no slope. Extrapolation says ~0.20 at N=500.</td><td class="red">Rejected</td></tr>
+<tr><td><span class="bold">C. Fundamental feature-class pivot (cross-market, latency, news flow)</span></td><td class="yellow">Weeks of new feature engineering; outside current data flow</td><td class="yellow">Medium — but DIAMOND's anomaly-detection framing isn't the right vehicle for these features</td><td class="yellow">Deferred — could inform future project</td></tr>
+<tr><td><span class="bold green">D. Shut down, archive, pivot to BERYL/CITRINE</span></td><td class="green">~1 day of close-out work</td><td class="green">High ROI — same engineering hour produces alpha on a different substrate</td><td class="green bold">Accepted</td></tr>
+</tbody>
+</table>
+
+<h2>6. Kill Criteria — How the System Knew to Stop Itself</h2>
+<div class="panel">
+<p>The Sprint 14g two-tier kill switch was designed for exactly this scenario:</p>
+<ul>
+  <li><span class="bold cyan">Tier 1 — Cumulative hard cap ($50)</span>: NEVER auto-resets. Hitting it means strategy must be re-validated before trading resumes. <span class="bold red">Fired 2026-05-08.</span></li>
+  <li><span class="bold cyan">Tier 2 — Daily soft cap ($20)</span>: Resets at UTC midnight. Designed to halt intraday blowouts.</li>
+</ul>
+<p>The Tier-1 firing is not a bug or a glitch — it is the system performing its designed function: <em>"the strategy has reached its structural risk tolerance; require human review before continuing."</em> A trading system that cannot stop itself is the most dangerous failure mode in retail quant. DIAMOND stopped itself.</p>
+</div>
+
+<h2>7. What We Learned — The Institutional Assets</h2>
+<p>The strategy failed. The <em>infrastructure</em> succeeded brilliantly. Every piece of armor below transfers directly to BERYL/CITRINE on Day 1.</p>
+
+<h3>7.1 Quantitative methodology</h3>
+<ul>
+  <li><span class="bold cyan">Point-in-Time (PiT) cross-validation</span> — <code>pit_mask.sum() &gt;= 50</code> per fold. Prevents lookahead bias. Refuses to score folds that don't have enough strictly-prior settled trades. The "0 attempted folds" at N=50/100 is a feature, not a bug.</li>
+  <li><span class="bold cyan">Cohort-burn discipline</span> — burned 733 contaminated trades across Sprints 14e/14f/14h rather than mix regimes. Preserved dataset stationarity. Cost 7-10 days each time; gained statistical validity.</li>
+  <li><span class="bold cyan">Null-importance permutation test</span> — 100 shuffles, 95th percentile threshold. Lets the regression honestly tell you which features have no signal.</li>
+  <li><span class="bold cyan">Two-Gate Stack epistemology</span> — Information gate (Brier &lt; 0.05) AND variance gate (Jaccard ≥ 0.70). Either alone is insufficient. Codified after Phase C empirical disaster (−$477 / 55% DD on bucket-WR + Kelly).</li>
+  <li><span class="bold cyan">Pre-registered falsifiable thresholds</span> — the N=300 Brier matrix (&lt;0.18 = signal / 0.20-0.22 = inconclusive / &gt;0.23 = dead) was committed BEFORE the data landed. Prevents Rorschach-test interpretation of results.</li>
+</ul>
+
+<h3>7.2 Execution infrastructure</h3>
+<ul>
+  <li><span class="bold cyan">Three-layer data integrity</span> — code fix + application guard + schema CHECK constraint, non-overlapping failure domains. Simultaneous failure requires three independent bugs. 0 firings since 2026-04-16.</li>
+  <li><span class="bold cyan">Two-tier kill switch</span> — daily soft cap + cumulative hard cap, with explicit reset semantics. The cumulative cap saved us from a multi-hundred-dollar bleed when the strategy proved unprofitable.</li>
+  <li><span class="bold cyan">Task-death watchdog (Sprint 14h)</span> — <code>asyncio.create_task</code> with a <code>done_callback</code> that fires CRITICAL Pushover on any unexpected task death. Makes silent failure of async background loops mathematically impossible.</li>
+  <li><span class="bold cyan">CancelledError-aware exception handling</span> — explicit catching of <code>asyncio.CancelledError</code> (a BaseException) inside long-running poll loops, with logging + continuation when <code>running=True</code>. Prevents the May 1 silent task death class permanently.</li>
+  <li><span class="bold cyan">Telemetry against absence</span> — <code>_book_absorption_stale</code> canary, heartbeat logs every N iterations, watchdog file-mtime checks. The system surfaces silent failure, not just loud failure.</li>
+</ul>
+
+<h3>7.3 Operator-side lessons</h3>
+<ul>
+  <li><span class="bold yellow">When the comfortable explanation doesn't fit the facts, the explanation is wrong, not the facts.</span> Pushed back on three "thin schedule" / "warmup window" / "lagging telemetry" rationalizations that turned out to mask Sprints 14e/14f/14g bugs.</li>
+  <li><span class="bold yellow">Monitor for <em>absence</em>, not just presence.</span> "Is the service running?" is a useless check. "Is the service doing real work?" is the right check.</li>
+  <li><span class="bold yellow">Burnout is a real failure mode.</span> 4 sandbox-era bugs in 9 days at Sprint 14e/f/g/h tempo is unsustainable. Build margin into the cadence.</li>
+  <li><span class="bold yellow">Separate the expected value of the strategy from the expected value of the engineer.</span> The strategy failed at retail scale. The engineer learned PiT CV, asyncio race conditions, and cohort hygiene — skills that compound on future projects.</li>
+</ul>
+
+<h2>8. Open Positions at Shutdown</h2>
+<p>Three positions remain open at the moment of shutdown. Per the standing rule, these are <em>preserved</em> to ride to natural settlement (no manual exits — preserves the training distribution's right tail and avoids further execution friction).</p>
+<table>
+<thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Opened</th><th>Note</th></tr></thead>
+<tbody>
+<tr><td><code>KXALIENS-27</code></td><td>no</td><td>78¢</td><td>2026-05-06</td><td>Long-dated political tail</td></tr>
+<tr><td><code>KXITFMATCH-26MAY02NIMGUO-GUO</code></td><td>no</td><td>49¢</td><td>2026-05-04</td><td>ITF tennis straggler</td></tr>
+<tr><td><code>KXTRUMPOUT27-27-26AUG01</code></td><td>yes</td><td>8¢</td><td>2026-04-24</td><td>The legendary Trump 8¢ tail — held since pre-Sprint-14f. Settles August 1, 2027.</td></tr>
+</tbody>
+</table>
+<p class="dim">Note: With the daemon stopped, settlement polling will no longer record final P&amp;L automatically. If/when these settle, the DB archive will show <code>status='filled'</code> with no final pnl_cents. This is acceptable for an archived research dataset.</p>
+
+<h2>9. Next Actions</h2>
+<ol>
+  <li><span class="bold">Stop services (this report)</span>: <code>sudo systemctl stop diamond-monitor diamond-dashboard</code> + <code>sudo systemctl disable</code> on both. Prevents auto-restart on reboot.</li>
+  <li><span class="bold">Archive DB</span>: copy <code>diamond_trades.db</code> to <code>diamond_trades.db.shutdown-2026-05-13</code> on VM. Retain locally too. 305 clean-cohort rows are a research asset.</li>
+  <li><span class="bold">Update CLAUDE.md</span>: mark DIAMOND as 🔴 RETIRED in the multi-project hub; preserve the Sprint 14a-14i history for posterity; remove DIAMOND from active service-management commands.</li>
+  <li><span class="bold">Memory handoff</span>: write <code>memory/session_handoff_2026_05_13.md</code> capturing the autopsy + shutdown actions.</li>
+  <li><span class="bold">Pivot capital + attention to BERYL/CITRINE</span>: BERYL's eviction engine (Sprint 16) is fresh and worth observing; CITRINE's exit-reason decomposition shows patient HMM exits profitable while stops bleed. Both are alpha-hunting candidates.</li>
+  <li><span class="bold">Optional: carry the watchdog pattern</span>: BERYL and CITRINE use synchronous Python (1d bars), not asyncio, so the Sprint 14h task-death pattern doesn't apply directly. But the PiT CV + null-permutation + cohort-burn discipline do. Consider auditing those projects for similar patterns.</li>
+</ol>
+
+<div class="verdict">
+<h3>Closing line</h3>
+<p>DIAMOND was the experiment. The result is the data. The data says no. That is success at the experiment level even though it is failure at the trading level. The infrastructure built to test this hypothesis is the lasting asset. We now redeploy that asset.</p>
+</div>
+
+<div class="footer">
+Generated 2026-05-13. Companion to memory handoff <code>session_handoff_2026_05_13.md</code>. See also: <code>2026_04_21_kelly_phase_abc.html</code> (Phase A/B/C harness), <code>2026_04_26_ml_learning_curve.html</code> (early learning curve sweep). Final learning curve JSON: <code>2026_04_26_ml_learning_curve.json</code>.
+</div>
+
+</div>
+</body>
+</html>

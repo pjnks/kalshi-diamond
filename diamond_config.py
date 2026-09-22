@@ -63,6 +63,12 @@ FEATURE_ENABLED = {name: True for name in FEATURE_WEIGHTS}
 # Structurally price-independent by construction (acceleration + relative flow).
 FEATURE_ENABLED["flow_acceleration"] = True
 FEATURE_ENABLED["event_relative_flow"] = True
+# Order-book absorption (Sprint 14e, 2026-04-26): ML-only, 4 candidate
+# variants logged per trade. Single FEATURE_ENABLED toggle controls all
+# 4 (they share data extraction). NOT in SCORER_WEIGHTS — composite score
+# and live entry/exit untouched. Ridge regression at N=500 retrain will
+# pick the variant(s) with real IC; null-importance test drops the rest.
+FEATURE_ENABLED["book_absorption"] = True
 
 # ── Rolling Windows ──────────────────────────────────────────────────────
 ROLLING_WINDOW_1H = 3600
@@ -87,6 +93,14 @@ PAPER_MIN_ALERT_LEVEL = os.getenv("PAPER_MIN_ALERT_LEVEL", "ALERT")
 PAPER_CONTRACTS_PER_TRADE = int(os.getenv("PAPER_CONTRACTS_PER_TRADE", "1"))
 PAPER_MAX_POSITIONS = int(os.getenv("PAPER_MAX_POSITIONS", "100"))  # High to allow all signals
 PAPER_MAX_UNREALIZED_CENTS = int(os.getenv("PAPER_MAX_UNREALIZED_CENTS", "2000"))  # $20 cap on open position costs
+# Sprint 14g (2026-05-01): two-tier kill switch.
+#   PAPER_MAX_UNREALIZED_CENTS — DAILY soft cap. Resets at UTC midnight.
+#       Protects against blowout days. Auto-clears next morning.
+#   PAPER_MAX_CUMULATIVE_CENTS — ALL-TIME hard cap. NEVER auto-resets.
+#       Protects against structural drift. Hitting this means manual
+#       review required — strategy must be re-validated before trading.
+# Both checks must pass for an entry to proceed.
+PAPER_MAX_CUMULATIVE_CENTS = int(os.getenv("PAPER_MAX_CUMULATIVE_CENTS", "5000"))   # $50 hard halt
 PAPER_POLL_INTERVAL_SEC = int(os.getenv("PAPER_POLL_INTERVAL_SEC", "120"))
 PAPER_NOTIFY_TRADES = os.getenv("PAPER_NOTIFY_TRADES", "true").lower() == "true"
 PAPER_MIN_PRICE_CENTS = int(os.getenv("PAPER_MIN_PRICE_CENTS", "5"))  # Skip trades ≤ this price
